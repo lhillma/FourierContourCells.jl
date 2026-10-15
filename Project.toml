@@ -1,0 +1,23 @@
+name = "FourierContourCells"
+uuid = "199c25b0-0c5e-4658-8424-08d56a2832c7"
+version = "0.1.0"
+authors = ["Leon Hillmann <l.hillmann@tue.nl>"]
+
+[workspace]
+projects = ["test", "examples"]
+
+[deps]
+Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
+ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
+KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+
+[compat]
+Adapt = "4.7.4"
+ForwardDiff = "1.4.6"
+KernelAbstractions = "0.9.45"
+LinearAlgebra = "1.13.0"
+Random = "1.11.0"
+StaticArrays = "1.9.23"
