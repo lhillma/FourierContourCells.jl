@@ -1,0 +1,54 @@
+cff-version: 1.2.0
+message: >-
+  This package is an independent implementation of the Fourier contour cell
+  model of Saito and Ishihara. If you use it, please cite their paper
+  (preferred citation below) and this software.
+title: "FourierContourCells.jl: a Julia implementation of the Fourier contour cell model"
+type: software
+authors:
+  - family-names: Hillmann
+    given-names: Leon
+    email: l.hillmann@tue.nl
+preferred-citation:
+  type: article
+  title: "Cell deformability drives fluid-to-fluid phase transition in active cell monolayers"
+  authors:
+    - family-names: Saito
+      given-names: Nen
+    - family-names: Ishihara
+      given-names: Shuji
+  journal: "Science Advances"
+  volume: 10
+  issue: 19
+  start: eadi8433
+  year: 2024
+  doi: 10.1126/sciadv.adi8433
+references:
+  - type: software
+    title: "Cell Deformability Drives Fluid-to-Fluid Phase Transition in Active Cell Monolayers (code and data)"
+    authors:
+      - family-names: Saito
+        given-names: Nen
+      - family-names: Ishihara
+        given-names: Shuji
+    publisher:
+      name: Zenodo
+    year: 2023
+    doi: 10.5281/zenodo.10356125
+    license: CC-BY-4.0
+  - type: article
+    title: "Dense HeLa cell monolayers remain liquid-like despite strong crowding"
+    authors:
+      - family-names: Pal
+        given-names: Suravi
+      - family-names: Saito
+        given-names: Nen
+      - family-names: Kawasaki
+        given-names: Takeshi
+      - family-names: Ebata
+        given-names: Hiroyuki
+    year: 2026
+    doi: 10.48550/arXiv.2609.18768
+    identifiers:
+      - type: other
+        value: "arXiv:2609.18768"

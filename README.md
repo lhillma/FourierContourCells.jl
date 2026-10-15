@@ -6,16 +6,23 @@ user-defined energy terms. The compute kernels are written with
 [KernelAbstractions.jl](https://github.com/JuliaGPU/KernelAbstractions.jl), so
 the same code runs multithreaded on the CPU and, in a later step, on the GPU.
 
-The model was introduced in
+This package is an **independent reimplementation**. The model, its equations
+of motion and the numerical scheme are entirely due to Nen Saito and Shuji
+Ishihara; it is not affiliated with or endorsed by them. Please cite their work
+(see [Citing](#citing)) when you use this code.
 
 > N. Saito and S. Ishihara, *Cell deformability drives fluid-to-fluid phase
 > transition in active cell monolayers*, Sci. Adv. **10**, eadi8433 (2024).
-> Reference code: [Zenodo 10356125](https://zenodo.org/records/10356125).
+> DOI: [10.1126/sciadv.adi8433](https://doi.org/10.1126/sciadv.adi8433)
+>
+> Reference code and data: N. Saito and S. Ishihara, Zenodo (2023), CC BY 4.0.
+> DOI: [10.5281/zenodo.10356125](https://doi.org/10.5281/zenodo.10356125)
 
-and used, with polydisperse radii, in
+Polydisperse radii and the reduced units follow
 
 > S. Pal, N. Saito, T. Kawasaki and H. Ebata, *Dense HeLa cell monolayers remain
 > liquid-like despite strong crowding*, arXiv:2609.18768 (2026).
+> DOI: [10.48550/arXiv.2609.18768](https://doi.org/10.48550/arXiv.2609.18768)
 
 ## Quick start
 
@@ -174,3 +181,36 @@ src/
   simulation.jl     Simulation, step!, run!
 ext/                Makie (visualisation) and Enzyme extensions
 ```
+
+## Citing
+
+If you use this package, please cite the original model paper and, where
+relevant, the reference implementation (also listed in `CITATION.cff`, which
+GitHub shows as "Cite this repository"):
+
+```bibtex
+@article{saito2024cell,
+  author  = {Saito, Nen and Ishihara, Shuji},
+  title   = {Cell deformability drives fluid-to-fluid phase transition in active cell monolayers},
+  journal = {Science Advances},
+  volume  = {10},
+  number  = {19},
+  pages   = {eadi8433},
+  year    = {2024},
+  doi     = {10.1126/sciadv.adi8433}
+}
+
+@software{saito2023code,
+  author    = {Saito, Nen and Ishihara, Shuji},
+  title     = {Cell Deformability Drives Fluid-to-Fluid Phase Transition in Active Cell Monolayers (code and data)},
+  publisher = {Zenodo},
+  year      = {2023},
+  doi       = {10.5281/zenodo.10356125}
+}
+```
+
+`test/data/reference_N64.txt` contains output of the authors' reference code
+(CC BY 4.0, [doi:10.5281/zenodo.10356125](https://doi.org/10.5281/zenodo.10356125)),
+run with the modifications listed in its header. The reference code itself is
+not redistributed here.
+
