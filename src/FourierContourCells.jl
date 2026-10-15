@@ -25,6 +25,10 @@ include("energies/body_terms.jl")
 include("gradients.jl")
 include("neighbors.jl")
 include("energies/contact.jl")
+include("dynamics.jl")
+include("simulation.jl")
+include("initial.jl")
+include("observables.jl")
 
 # geometry and state
 export FourierBasis, PeriodicBox, Bodies, BodyType, nbodies, ncoef, nmodes
@@ -34,5 +38,9 @@ export densities, combine, density_gradients, combine_gradient, pressure, intera
     applies_to, ad_backend, ForwardDiffAD, EnzymeAD
 # built-in energy terms
 export Tension, PerimeterElasticity, Overlap, LinearRepulsion
+# simulation
+export Simulation, step!, run!, compute_gradients!, hexagonal_monolayer, CPU
+# observables
+export perimeters, areas, shape_index, positions, unwrapped_positions, contours, body_energy
 
 end

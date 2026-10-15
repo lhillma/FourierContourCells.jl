@@ -23,4 +23,5 @@ end
 
 @testset "FourierContourCells" begin
     include("test_geometry.jl")
+    include("test_dynamics.jl")
 end
