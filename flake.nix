@@ -39,7 +39,7 @@
 
         profile = ''
           export JULIA_DEPOT_PATH="$PWD/.julia"
-          export JULIA_PROJECT="$PWD"
+          export JULIA_PROJECT="$PWD/examples/"
           echo "Entered FHS-compatible Julia development shell."
           echo "Using CUDA Toolkit version: ${cudatoolkit.version}"
           echo "Julia packages will be stored in '$PWD/.julia'"
