@@ -1,11 +1,17 @@
 """
     CellList(box, cutoff, N; backend)
 
-Uniform grid for neighbour search. Bodies are sorted by grid cell index, and
-`start[c]:stop[c]` indexes the sorted permutation `perm` for cell `c`. Grid
-cells are at least `cutoff` wide, so interacting pairs live in adjacent cells.
-A dimension with fewer than three grid cells collapses to a single cell, in
-which case all bodies along it are checked with the minimum image convention.
+Uniform grid for neighbour search. Grid cells are at least `cutoff` wide, so
+interacting pairs live in the same or adjacent grid cells. A dimension with
+fewer than three grid cells collapses to a single cell, in which case all
+bodies along it are checked with the minimum image convention.
+
+Fields:
+- `ncx`, `ncy`: number of grid cells along x and y; `wx`, `wy`: their widths
+- `cellid`: N, linear grid cell index of each body, `cx + ncx·cy + 1`
+- `perm`: N, body indices sorted by `cellid`
+- `start`, `stop`: `ncx·ncy`, bodies of grid cell `c` are
+  `perm[start[c]:stop[c]]` (empty cells have `start = 1`, `stop = 0`)
 """
 struct CellList{T, VI <: AbstractVector{Int32}}
     ncx::Int32
@@ -26,17 +32,36 @@ function CellList(box::PeriodicBox{T}, cutoff, N::Integer; backend = CPU()) wher
         alloc(N), alloc(N), alloc(ncx * ncy), alloc(ncx * ncy))
 end
 
-"Grid cell coordinates (0-based) of a wrapped position."
+"""
+Grid cell coordinates (0-based) of the wrapped position (`x`, `y`) on a grid
+with `cl_ncx × cl_ncy` cells of size `wx × wy`. Positions exactly at the upper
+box edge are clamped into the last cell.
+"""
 @inline grid_coords(cl_ncx, cl_ncy, wx, wy, x, y) =
     (min(unsafe_trunc(Int32, x / wx), cl_ncx - Int32(1)),
      min(unsafe_trunc(Int32, y / wy), cl_ncy - Int32(1)))
 
+# Assign each body to its grid cell. One work item per body i.
+#
+#   cellid  (out) N, linear grid cell index (1-based) of each body
+#   x, y    N, wrapped body positions
+#   ncx, ncy, wx, wy  grid size and cell widths (see CellList)
 @kernel function cell_index_kernel!(cellid, @Const(x), @Const(y), ncx, ncy, wx, wy)
     i = @index(Global)
     cx, cy = grid_coords(ncx, ncy, wx, wy, x[i], y[i])
     cellid[i] = cx + ncx * cy + Int32(1)
 end
 
+# Find the range of each grid cell in the sorted body list. One work item per
+# position s in the sorted order: s starts a cell if the previous body lies in
+# a different cell and ends it if the next one does (bodies of one cell are
+# contiguous after sorting by cellid).
+#
+#   start, stop  (out) ncx·ncy, first/last sorted position of each grid cell
+#                (must be reset to 1/0 beforehand so empty cells are empty ranges)
+#   cellid       N, grid cell of each body
+#   perm         N, body indices sorted by cellid
+#   N            number of bodies
 @kernel function cell_bounds_kernel!(start, stop, @Const(cellid), @Const(perm), N)
     s = @index(Global)
     c = cellid[perm[s]]
@@ -83,6 +108,22 @@ end
 
 capacity(nl::NeighborList) = size(nl.idx, 1)
 
+# Build the per-body neighbour list. One work item per body i: loop over the
+# 3×3 grid cells around i (fewer for collapsed dimensions) and keep every j ≠ i
+# with centre distance ≤ rmaxᵢ + rmaxⱼ + range. Otherwise no contour point of i
+# (at distance ≤ rmaxᵢ from rᵢ) can come within rmaxⱼ + range of rⱼ, i.e. within
+# range of body j. Entries beyond the capacity are counted but not stored, so
+# the caller can detect overflow and retry with a larger matrix.
+#
+#   idx      (out) cap × N, neighbour indices of body i in column i
+#   count    (out) N, number of neighbours found (may exceed cap)
+#   x, y     N, wrapped body positions
+#   rmax     N, upper bound of each body's contour radius
+#   perm, start, stop  cell list (see CellList)
+#   Lx, Ly   box size (minimum image convention)
+#   ncx, ncy, wx, wy   grid size and cell widths
+#   range    interaction range of the contact terms beyond contact
+#   cap      capacity, size(idx, 1)
 @kernel function neighbor_kernel!(idx, count, @Const(x), @Const(y), @Const(rmax), @Const(perm),
         @Const(start), @Const(stop), Lx, Ly, ncx, ncy, wx, wy, range, cap)
     i = @index(Global)

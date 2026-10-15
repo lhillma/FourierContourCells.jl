@@ -4,14 +4,24 @@
 #   θ̇  = -μθ ∂E/∂θ + √(2Dr) ξ
 #   ȧₙ = -μab ∂E/∂aₙ,  ḃₙ = -μab ∂E/∂bₙ
 
-"Bound on Σₙ √(aₙ² + bₙ²) keeping R(φ) > 0 under the hard area constraint."
+"""
+Bound on s = Σₙ √(aₙ² + bₙ²) keeping R(φ) > 0 under the hard area constraint.
+
+Derivation: |aₙ cos + bₙ sin| ≤ √(aₙ² + bₙ²), so R/R₀ ≥ a₀ - s. With
+q = Σₙ (aₙ² + bₙ²) ≤ s², the area constraint gives a₀ = √(1 - q/2) ≥ √(1 - s²/2),
+which exceeds s whenever s² < 2/3.
+"""
 const SHAPE_BOUND = sqrt(2 / 3)
 
 """
     enforce_shape!(coef, i, K)
 
-Rescale the shape modes of body `i` so that Σₙ √(aₙ² + bₙ²) ≤ √(2/3) and set
-a₀ = √(1 - Σₙ (aₙ² + bₙ²)/2) (hard area constraint, area πR0²).
+Rescale the shape modes of body `i` (column `i` of `coef`, `K` modes) so that
+Σₙ √(aₙ² + bₙ²) ≤ √(2/3) (see [`SHAPE_BOUND`](@ref)) and set
+a₀ = √(1 - Σₙ (aₙ² + bₙ²)/2). The latter is the hard area constraint: by
+orthogonality of the Fourier modes, the area is
+½ ∮ R² dφ = π R₀² (a₀² + Σₙ (aₙ² + bₙ²)/2), which equals πR₀² exactly then.
+Callable from kernels.
 
 Note: the reference implementation (FourierContourCell.cpp, `setR`) only
 rescales the n = 2 mode because of a loop bug; here all modes are rescaled as
@@ -39,6 +49,8 @@ described in the paper.
     return nothing
 end
 
+# Apply `enforce_shape!` to every body. One work item per body i.
+#   coef  (in/out) ncoef × N body-frame coefficients;  K  number of shape modes
 @kernel function enforce_shape_kernel!(coef, K)
     i = @index(Global)
     enforce_shape!(coef, i, K)
@@ -50,10 +62,29 @@ function enforce_shape!(bodies::Bodies, basis::FourierBasis)
     return bodies
 end
 
+# One Euler–Maruyama step for every body. One work item per body i.
+#
+# With p = types[type[i]] the parameters of body i's type and ξ standard normal
+# numbers, the update reads
+#   r  ← r + dt (v0 (cos θ, sin θ) - μr ∂E/∂r) + √(2 Dt dt) (ξ₁, ξ₂)
+#   θ  ← θ - dt μθ ∂E/∂θ + √(2 Dr dt) ξ₃
+#   aₙ ← aₙ - dt μab ∂E/∂aₙ,  bₙ ← bₙ - dt μab ∂E/∂bₙ
+# using the orientation θ before the update for the propulsion (explicit
+# scheme). Afterwards the shape constraints are enforced and the position is
+# wrapped into the box, counting crossed periods in the image counters.
+#
+#   x, y, θ      (in/out) N, positions and orientations
+#   imgx, imgy   (in/out) N, periodic image counters
+#   coef         (in/out) ncoef × N body-frame coefficients
+#   type         N, body types (index into `types`)
+#   gx, gy, gθ   N, energy gradients ∂E/∂x, ∂E/∂y, ∂E/∂θ
+#   gcoef        ncoef × N, ∂E/∂[a₀; aₙ; bₙ] (row 1 unused)
+#   ξ            3 × N standard normal random numbers
+#   types        tuple of BodyType (isbits, indexed with the type)
+#   dt           time step; Lx, Ly: box size; K: number of shape modes
 @kernel function euler_maruyama_kernel!(x, y, θ, imgx, imgy, coef, @Const(type), @Const(gx),
         @Const(gy), @Const(gθ), @Const(gcoef), @Const(ξ), types, dt, Lx, Ly, K)
     i = @index(Global)
-    T = eltype(x)
     p = types[type[i]]
     s, c = sincos(θ[i])
     σt = sqrt(2 * p.Dt * dt)

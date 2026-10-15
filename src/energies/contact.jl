@@ -39,6 +39,9 @@ end
 
 @inline pressure(r::LinearRepulsion, d, ti, tj, related) = ifelse(d > 0, oftype(d, r.k) * d, zero(d))
 
+# Sum of g(d) over a tuple of contact terms, skipping terms that do not apply
+# to the type of body i. Recursion over the tuple is unrolled at compile time,
+# so heterogeneous term tuples are type-stable inside kernels.
 @inline _pressure(::Tuple{}, d, ti, tj, rel) = zero(d)
 @inline function _pressure(terms::Tuple, d, ti, tj, rel)
     t = first(terms)
@@ -46,8 +49,26 @@ end
     return g + _pressure(Base.tail(terms), d, ti, tj, rel)
 end
 
+"Largest interaction range beyond contact of a tuple of contact terms."
 contact_range(terms::Tuple) = isempty(terms) ? 0.0 : maximum(interaction_range, terms)
 
+# Contact energy density at every contour node. One work item per (node k,
+# body i): the node sits at u = rᵢ + Rᵢ(φₖ) (cos φₖ, sin φₖ). For each listed
+# neighbour j, the vector u - rⱼ (minimum image) has length dist and angle ψ;
+# the penetration depth of u into j is d = Rⱼ(ψ) - dist (d > 0: u inside j).
+# All contact terms are evaluated at d and summed. Nodes farther than
+# rmaxⱼ + range from rⱼ are skipped without evaluating Rⱼ(ψ).
+#
+#   P          (out) nθ × N, Σⱼ Σ_terms g(d) at node k of body i
+#   x, y       N, wrapped body positions
+#   R          nθ × N, contour radii at the nodes
+#   lab        ncoef × N, lab-frame coefficients (to evaluate Rⱼ(ψ) off-grid)
+#   rmax, R0   N, contour radius bound and radius scale per body
+#   type       N, body types; parent: N, parent ids (related = same parent)
+#   nidx, ncount  neighbour list (see NeighborList)
+#   terms      tuple of ContactTerms
+#   Lx, Ly     box size; K: number of shape modes; Δφ: node spacing
+#   range      largest interaction range of the terms beyond contact
 @kernel function contact_pressure_kernel!(P, @Const(x), @Const(y), @Const(R), @Const(lab),
         @Const(rmax), @Const(R0), @Const(type), @Const(parent), @Const(nidx), @Const(ncount),
         terms, Lx, Ly, K, Δφ, range)
