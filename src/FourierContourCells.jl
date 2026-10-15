@@ -16,5 +16,12 @@ using StaticArrays: SVector, SMatrix
 import ForwardDiff
 
 include("utils.jl")
+include("basis.jl")
+include("box.jl")
+include("bodies.jl")
+include("geometry.jl")
+
+# geometry and state
+export FourierBasis, PeriodicBox, Bodies, BodyType, nbodies, ncoef, nmodes
 
 end

@@ -22,4 +22,5 @@ function deformed_coef(rng = Xoshiro(3); maxmode = 6, amplitude = 0.04)
 end
 
 @testset "FourierContourCells" begin
+    include("test_geometry.jl")
 end
