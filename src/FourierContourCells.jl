@@ -23,6 +23,8 @@ include("geometry.jl")
 include("energies/interface.jl")
 include("energies/body_terms.jl")
 include("gradients.jl")
+include("neighbors.jl")
+include("energies/contact.jl")
 
 # geometry and state
 export FourierBasis, PeriodicBox, Bodies, BodyType, nbodies, ncoef, nmodes
@@ -31,6 +33,6 @@ export EnergyTerm, BodyTerm, ContactTerm, BodyInfo, OnTypes
 export densities, combine, density_gradients, combine_gradient, pressure, interaction_range,
     applies_to, ad_backend, ForwardDiffAD, EnzymeAD
 # built-in energy terms
-export Tension, PerimeterElasticity
+export Tension, PerimeterElasticity, Overlap, LinearRepulsion
 
 end
