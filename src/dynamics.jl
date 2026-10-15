@@ -3,6 +3,11 @@
 #   ṙ  = v0 e(θ) - μr ∂E/∂r + √(2Dt) ξ
 #   θ̇  = -μθ ∂E/∂θ + √(2Dr) ξ
 #   ȧₙ = -μab ∂E/∂aₙ,  ḃₙ = -μab ∂E/∂bₙ
+#
+# with independent standard white noises ξ. The dynamics is active and
+# athermal: Dr and Dt are free noise amplitudes, not tied to a temperature,
+# and the shape modes carry no noise. Reduced units: length R₀, energy k R₀²
+# (k = overlap coupling), time 1/(μr k).
 
 """
 Bound on s = Σₙ √(aₙ² + bₙ²) keeping R(φ) > 0 under the hard area constraint.

@@ -4,11 +4,16 @@
 Dynamical parameters shared by all bodies of one type (e.g. cells, nuclei):
 
 - `v0`:  self-propulsion speed along the orientation θ
-- `Dr`:  rotational diffusion coefficient of θ
-- `Dt`:  translational diffusion coefficient (0 in the original model)
+- `Dr`:  rotational diffusion coefficient of θ (noise √(2Dr) ξ, persistence
+  time 1/Dr)
+- `Dt`:  translational diffusion coefficient (noise √(2Dt) ξ on x and y; 0 in
+  the original model)
 - `μr`, `μθ`, `μab`: mobilities of position, orientation and shape coefficients
 
-Defaults follow Saito & Ishihara (2024) except `v0` and `Dr`.
+The model has no temperature: `Dr` and `Dt` are the only noise amplitudes and
+the shape modes are noiseless. Values are in reduced units (length R₀, energy
+k R₀² with k the overlap coupling, time 1/(μr k)); see the README section
+"Units and noise". Defaults follow Saito & Ishihara (2024) except `v0` and `Dr`.
 """
 struct BodyType{T}
     v0::T

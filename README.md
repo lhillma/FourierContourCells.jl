@@ -59,6 +59,32 @@ with a₀ = √(1 − Σₙ(aₙ² + bₙ²)/2) fixing the area to πR₀² and 
 
 is integrated with Euler–Maruyama; contour integrals use `nθ` = 40 nodes.
 
+### Units and noise
+
+The model is **athermal and active**. It contains the following stochastic
+forces:
+
+- rotational noise on the polarity θ with diffusion coefficient `Dr`
+  (persistence time 1/Dr), which together with `v0` makes cells active
+  Brownian particles, and
+- optional translational noise with diffusion coefficient `Dt` (0 in the
+  paper, so positions only move by self-propulsion and forces).
+
+All quantities are in reduced units, following Saito & Ishihara and Pal et al.:
+
+| scale  | unit                    | set by                                         |
+|:-------|:------------------------|:-----------------------------------------------|
+| length | R₀ (cell radius)        | `R0 = 1` in `hexagonal_monolayer`              |
+| energy | k R₀²                   | overlap energy per unit area k: `Overlap(1.0)` |
+| time   | t₀ = 1/(μr k)           | translational mobility `μr = 1`                |
+
+In these units the parameters are dimensionless combinations: tension
+η/(kR₀), speed v₀/(μr k R₀), rotational diffusion Dr/(μr k), translational
+diffusion Dt/(μr k R₀²), and mobilities μθR₀²/μr and μabR₀²/μr for the
+orientation and the (dimensionless) shape modes. Pal et al. use the cell
+diameter L₀ = 2R₀ as length unit instead; their η and v₀ differ from ours by
+factors of 2 accordingly.
+
 ## Energy terms
 
 Energies act on bodies through their contour samples R(φₖ), R′(φₖ), R″(φₖ).
