@@ -1,3 +1,21 @@
+"Parse the reference fixture written by the original C++ code."
+function read_reference(path)
+    init = Vector{Vector{Float64}}()
+    snaps = Dict{Int, Vector{Vector{Float64}}}()
+    current = -1
+    for l in eachline(path)
+        if startswith(l, "#init")
+            push!(init, parse.(Float64, split(l)[2:end]))
+        elseif startswith(l, "#T=")
+            current = parse(Int, split(l[4:end])[1]) + 1   # state after T+1 steps
+            snaps[current] = Vector{Vector{Float64}}()
+        elseif startswith(l, "#cell")
+            push!(snaps[current], parse.(Float64, split(l)[2:end]))
+        end
+    end
+    return reduce(hcat, init), Dict(k => reduce(hcat, v) for (k, v) in snaps)
+end
+
 @testset "dynamics" begin
     @testset "hard area constraint" begin
         bodies, box = hexagonal_monolayer(2, 2)
@@ -27,5 +45,25 @@
         sim = Simulation(bodies, PeriodicBox(1.0, 1.0); types = (BodyType(Dr = 0.1),), dt = 0.01, seed = 7)
         step!(sim, 500)
         @test var(Array(sim.bodies.θ); mean = 0) ≈ 2 * 0.1 * sim.t rtol = 0.1
+    end
+
+    @testset "regression against reference implementation" begin
+        init, snaps = read_reference(joinpath(@__DIR__, "data", "reference_N64.txt"))
+        N = size(init, 2)
+        Ls = sqrt(N * π / (0.95 * 2sqrt(3)))
+        coef = [1.0; zeros(10)] .* ones(1, N)
+        bodies = Bodies(init[1, :], init[2, :], init[3, :], coef, ones(N))
+        sim = Simulation(bodies, PeriodicBox(2Ls, sqrt(3) * Ls);
+            types = (BodyType(v0 = 0.06, Dr = 0.0, μab = 0.1),),
+            energies = (Tension(0.01), Overlap(1.0)), dt = 0.005)
+        for n in sort(collect(keys(snaps)))
+            step!(sim, n - sim.step)
+            ref = snaps[n]
+            pos = unwrapped_positions(sim)
+            @test pos[1, :] ≈ ref[4, :] atol = 1e-10
+            @test pos[2, :] ≈ ref[5, :] atol = 1e-10
+            @test Array(sim.bodies.θ) ≈ ref[3, :] atol = 1e-10
+            @test Array(sim.bodies.coef)[2:end, :] ≈ ref[6:15, :] atol = 1e-10
+        end
     end
 end
