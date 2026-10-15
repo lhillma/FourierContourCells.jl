@@ -14,8 +14,15 @@ LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 
+[weakdeps]
+Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
+
+[extensions]
+FourierContourCellsEnzymeExt = "Enzyme"
+
 [compat]
 Adapt = "4.7.4"
+Enzyme = "0.13"
 ForwardDiff = "1.4.6"
 KernelAbstractions = "0.9.45"
 LinearAlgebra = "1.13.0"

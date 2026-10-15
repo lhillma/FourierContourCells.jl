@@ -26,4 +26,5 @@ end
     include("test_energies.jl")
     include("test_contact.jl")
     include("test_dynamics.jl")
+    include("test_enzyme.jl")
 end
