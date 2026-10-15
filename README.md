@@ -65,21 +65,32 @@ Energies act on bodies through their contour samples R(φₖ), R′(φₖ), R″
 The library maps contour gradients to (**r**, θ, aₙ, bₙ) by the chain rule
 (dense matrix products), so new terms never deal with Fourier coefficients.
 
-**Single-body terms** (`BodyTerm`) have the form E = F(Q₁,…,Qₘ) with
-Qⱼ = ∮ qⱼ(R, R′, R″) dφ. Define the integrands and F; derivatives come from
-automatic differentiation (ForwardDiff by default, Enzyme via
-`ad_backend(::MyTerm) = EnzymeAD()` after `using Enzyme`) unless you provide
-them by hand:
+**Single-body terms** (`BodyTerm`) are built from contour integrals in two
+stages: `contour_integrands(term, R, R′, R″)` returns integrands qⱼ, which the
+library integrates to Qⱼ = ∮ qⱼ dφ, and `energy(term, Q, body)` returns
+E = F(Q) (default: `sum(Q)`, i.e. the integrand is an energy density).
+Derivatives come from automatic differentiation (ForwardDiff by default,
+Enzyme via `ad_backend(::MyTerm) = EnzymeAD()` after `using Enzyme`) unless
+you provide them by hand:
 
 ```julia
-struct PerimeterElasticity{T} <: BodyTerm   # built in; shown as a template
+import FourierContourCells: contour_integrands, energy
+
+struct Bending{T} <: BodyTerm      # E = κ ∮ c² ds: integrand only
+    κ::T
+end
+contour_integrands(t::Bending, R, dR, ddR) = t.κ * (R^2 + 2dR^2 - R * ddR)^2 / (R^2 + dR^2)^(5 / 2)
+
+struct PerimeterElasticity{T} <: BodyTerm   # E = λ (l - l₀)²: nonlinear in Q
     λ::T
     p0::T
 end
-contour_integrands(::PerimeterElasticity, R, dR, ddR) = sqrt(R^2 + dR^2)
+contour_integrands(::PerimeterElasticity, R, dR, ddR) = sqrt(R^2 + dR^2)   # Q[1] = perimeter
 energy(t::PerimeterElasticity, Q, body) = t.λ * (Q[1] - t.p0 * sqrt(π) * body.R0)^2
-# optional, for speed: contour_integrand_gradients(...) and energy_gradient(...)
 ```
+
+`examples/custom_energy.jl` is a step-by-step tutorial, including hand-written
+derivatives and a contact term.
 
 **Contact terms** (`ContactTerm`) give the energy density g(d) felt by a contour
 point at penetration depth d into a neighbour (d > 0 inside). The energy of
@@ -93,8 +104,7 @@ pressure(o::Overlap, d, tᵢ, tⱼ, related) = d ≥ 0 ? J[tᵢ, tⱼ] : 0   # (
 Built-in terms: `Tension(η)` (paper), `PerimeterElasticity(λ, p0)`,
 `Overlap(J; related)` (paper's excluded volume, with CPM-like coupling tables
 per type pair and for bodies with the same parent), `LinearRepulsion(k)`.
-`OnTypes(term, types...)` restricts any term to body types. See
-`examples/custom_energy.jl` for bending and adhesion terms.
+`OnTypes(term, types...)` restricts any term to body types.
 
 **Nuclei.** Bodies carry a `type` and a `parent`. A nucleus is a body whose
 parent is its cell; a negative `related` coupling in `Overlap` rewards overlap
