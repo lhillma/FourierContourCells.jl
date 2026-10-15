@@ -1,4 +1,7 @@
-"Parse the reference fixture written by the original C++ code."
+"""
+Parse the reference fixture: output of the original C++ code by Saito & Ishihara
+(doi:10.5281/zenodo.10356125, CC BY 4.0); see the header of the data file.
+"""
 function read_reference(path)
     init = Vector{Vector{Float64}}()
     snaps = Dict{Int, Vector{Vector{Float64}}}()

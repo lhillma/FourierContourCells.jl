@@ -101,7 +101,9 @@ end
 ## Contact pressure → contour and centre gradients
 
 # Convert the contact energy density P = g on the contour into gradients of
-# body i's contact energy Eᵢ = ∫_{Ωᵢ} g dA. One work item per body i.
+# body i's contact energy Eᵢ = ∫_{Ωᵢ} g dA. One work item per body i. For
+# g = H(d) this reproduces the force, torque and shape terms of Saito &
+# Ishihara (2024), Eqs. (4) and (5), doi:10.1126/sciadv.adi8433.
 #
 # Moving the boundary of Ωᵢ changes Eᵢ by ∮ g δn ds, where δn ds is the area
 # swept by the boundary element. The three kinds of motion:

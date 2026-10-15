@@ -5,7 +5,8 @@
 Circular cells of radius `R0` on a hexagonal lattice with `nx` cells per row
 and `ny` rows, at area fraction `packing`, with uniformly random orientations.
 The box has aspect ratio Lx : Ly = 2nx : √3 ny (2 : √3 for nx = ny, as in
-Saito & Ishihara (2024)); `ny` must be even for a periodic lattice.
+Saito & Ishihara (2024), doi:10.1126/sciadv.adi8433); `ny` must be even for
+a periodic lattice. The lattice construction follows their reference code.
 """
 function hexagonal_monolayer(nx::Integer, ny::Integer; packing = 0.95, R0 = 1.0, maxmode::Integer = 6,
         rng = Random.Xoshiro(1))

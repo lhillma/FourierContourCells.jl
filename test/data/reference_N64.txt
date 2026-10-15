@@ -1,5 +1,7 @@
-# Regression fixture generated with FourierContourCell.cpp (Saito & Ishihara, Sci. Adv. 10, eadi8433 (2024);
-# code: https://zenodo.org/records/10356125), patched for N = 64, double-precision pi and full-precision output.
+# Regression fixture: output of FourierContourCell.cpp by N. Saito and S. Ishihara (Zenodo, doi:10.5281/zenodo.10356125,
+# licensed CC BY 4.0), accompanying Sci. Adv. 10, eadi8433 (2024), doi:10.1126/sciadv.adi8433.
+# Changes to the original code before running: N = 64, pi = M_PI instead of 3.1415926535, full-precision output of the
+# initial state and of positions/coefficients. The output was trimmed to the rows below. The data are not endorsed by the authors.
 # Run: ./a.out 0.06 0 0.95 0.01  (v0 = 0.06, Dr = 0, packing = 0.95, eta = 0.01), dt = 0.005, M = 6, Ntheta = 40.
 # '#init x y theta' rows: initial state (circular cells).
 # '#T=t' blocks: state after t+1 steps; '#cell x y theta xc yc a2..a6 b2..b6' rows.

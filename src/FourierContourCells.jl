@@ -1,10 +1,28 @@
 """
     FourierContourCells
 
-Implementation of the Fourier contour cell model (N. Saito and S. Ishihara,
-Sci. Adv. 10, eadi8433 (2024)), generalised to typed bodies (cells, nuclei, ...)
-and user-defined energy terms. Kernels are written with KernelAbstractions.jl
-so the same code runs on CPU and GPU.
+Independent Julia implementation of the Fourier contour cell model,
+generalised to typed bodies (cells, nuclei, ...) and user-defined energy terms.
+Kernels are written with KernelAbstractions.jl so the same code runs on CPU and
+GPU.
+
+The model, its equations of motion and its numerical scheme are due to
+
+    N. Saito and S. Ishihara, "Cell deformability drives fluid-to-fluid phase
+    transition in active cell monolayers", Sci. Adv. 10, eadi8433 (2024),
+    doi:10.1126/sciadv.adi8433
+
+with reference code by the same authors (CC BY 4.0):
+
+    N. Saito and S. Ishihara, Zenodo (2023), doi:10.5281/zenodo.10356125
+
+Polydisperse radii and the reduced-unit conventions follow
+
+    S. Pal, N. Saito, T. Kawasaki and H. Ebata, "Dense HeLa cell monolayers
+    remain liquid-like despite strong crowding", arXiv:2609.18768 (2026),
+    doi:10.48550/arXiv.2609.18768
+
+Please cite these works when using this package (see README and CITATION.cff).
 """
 module FourierContourCells
 

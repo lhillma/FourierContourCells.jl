@@ -13,7 +13,8 @@ Dynamical parameters shared by all bodies of one type (e.g. cells, nuclei):
 The model has no temperature: `Dr` and `Dt` are the only noise amplitudes and
 the shape modes are noiseless. Values are in reduced units (length R₀, energy
 k R₀² with k the overlap coupling, time 1/(μr k)); see the README section
-"Units and noise". Defaults follow Saito & Ishihara (2024) except `v0` and `Dr`.
+"Units and noise". Defaults follow Saito & Ishihara (2024), doi:10.1126/sciadv.adi8433, except
+`v0` and `Dr`.
 """
 struct BodyType{T}
     v0::T

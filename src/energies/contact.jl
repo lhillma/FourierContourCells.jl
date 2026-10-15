@@ -1,8 +1,9 @@
 """
     Overlap(J; related = J)
 
-Excluded-volume interaction of Saito & Ishihara (2024): the energy is the
-overlap area weighted by a coupling J, i.e. g(d) = J·H(d). Couplings can be
+Excluded-volume interaction of Saito & Ishihara (2024),
+doi:10.1126/sciadv.adi8433: the energy is the overlap area weighted by a
+coupling J, i.e. g(d) = J·H(d). The coupling tables are an extension. Couplings can be
 scalars (one body type) or `ntypes × ntypes` matrices indexed by
 `(type_i, type_j)`, like the J table of the cellular Potts model. `related`
 applies to pairs of bodies with the same parent (e.g. a cell and its nucleus);
@@ -52,7 +53,10 @@ end
 "Largest interaction range beyond contact of a tuple of contact terms."
 contact_range(terms::Tuple) = isempty(terms) ? 0.0 : maximum(interaction_range, terms)
 
-# Contact energy density at every contour node. One work item per (node k,
+# Contact energy density at every contour node. The sharp-interface contour
+# formulation and the inside test Rⱼ(arg(u - rⱼ)) > |u - rⱼ| (with the rmax
+# pre-check) follow Eqs. (4) and (6) of Saito & Ishihara (2024),
+# doi:10.1126/sciadv.adi8433. One work item per (node k,
 # body i): the node sits at u = rᵢ + Rᵢ(φₖ) (cos φₖ, sin φₖ). For each listed
 # neighbour j, the vector u - rⱼ (minimum image) has length dist and angle ψ;
 # the penetration depth of u into j is d = Rⱼ(ψ) - dist (d > 0: u inside j).

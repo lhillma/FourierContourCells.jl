@@ -2,7 +2,8 @@
 #
 #   julia -t auto --project=examples examples/live.jl
 #
-# Parameters of the "soft fluid" phase of Saito & Ishihara (2024), Fig. 2C.
+# Parameters of the "soft fluid" phase of Saito & Ishihara, Sci. Adv. 10, eadi8433
+# (2024), Fig. 2C, doi:10.1126/sciadv.adi8433.
 
 using FourierContourCells
 using GLMakie

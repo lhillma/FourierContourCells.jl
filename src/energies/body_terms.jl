@@ -1,8 +1,9 @@
 """
     Tension(η)
 
-Line tension η·l with the perimeter l = ∮ √(R² + R'²) dφ (Saito & Ishihara,
-2024). Derivatives are implemented by hand.
+Line tension η·l with the perimeter l = ∮ √(R² + R'²) dφ, the membrane
+tension term of Saito & Ishihara (2024), doi:10.1126/sciadv.adi8433.
+Derivatives are implemented by hand.
 """
 struct Tension{T} <: BodyTerm
     η::T

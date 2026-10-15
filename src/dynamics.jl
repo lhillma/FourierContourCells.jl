@@ -1,3 +1,8 @@
+# Equations of motion of the Fourier contour cell model, Eq. (5) and Materials
+# and Methods of N. Saito and S. Ishihara, Sci. Adv. 10, eadi8433 (2024), doi:10.1126/sciadv.adi8433;
+# the update order follows the authors' reference code (Zenodo,
+# doi:10.5281/zenodo.10356125).
+#
 # Overdamped Langevin dynamics, integrated with the Euler–Maruyama scheme:
 #
 #   ṙ  = v0 e(θ) - μr ∂E/∂r + √(2Dt) ξ
@@ -28,9 +33,11 @@ orthogonality of the Fourier modes, the area is
 ½ ∮ R² dφ = π R₀² (a₀² + Σₙ (aₙ² + bₙ²)/2), which equals πR₀² exactly then.
 Callable from kernels.
 
-Note: the reference implementation (FourierContourCell.cpp, `setR`) only
-rescales the n = 2 mode because of a loop bug; here all modes are rescaled as
-described in the paper.
+Constraint and bound as in Saito & Ishihara (2024), doi:10.1126/sciadv.adi8433
+(Materials and Methods). Note: the reference implementation
+(FourierContourCell.cpp, `setR`, doi:10.5281/zenodo.10356125) only rescales
+the n = 2 mode because of a loop bug; here all modes are rescaled as described
+in the paper.
 """
 @inline function enforce_shape!(coef, i, K)
     T = eltype(coef)

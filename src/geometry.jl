@@ -25,6 +25,9 @@ function Geometry(basis::FourierBasis, bodies::Bodies)
         alloc(basis.nθ, N), alloc(N))
 end
 
+# Fourier contour representation of Saito & Ishihara, Eqs. (1) and (5) of
+# N. Saito and S. Ishihara, Sci. Adv. 10, eadi8433 (2024), doi:10.1126/sciadv.adi8433.
+
 # Coefficient layout (all `ncoef × N` matrices): column i belongs to body i,
 # row 1 holds a₀, rows 1+m and 1+K+m hold the cosine and sine coefficients of
 # mode n = m + 1 (m = 1, …, K, K = number of shape modes).
