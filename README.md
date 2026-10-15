@@ -66,7 +66,7 @@ The library maps contour gradients to (**r**, θ, aₙ, bₙ) by the chain rule
 (dense matrix products), so new terms never deal with Fourier coefficients.
 
 **Single-body terms** (`BodyTerm`) have the form E = F(Q₁,…,Qₘ) with
-Qⱼ = ∮ qⱼ(R, R′, R″) dφ. Define the densities and F; derivatives come from
+Qⱼ = ∮ qⱼ(R, R′, R″) dφ. Define the integrands and F; derivatives come from
 automatic differentiation (ForwardDiff by default, Enzyme via
 `ad_backend(::MyTerm) = EnzymeAD()` after `using Enzyme`) unless you provide
 them by hand:
@@ -76,9 +76,9 @@ struct PerimeterElasticity{T} <: BodyTerm   # built in; shown as a template
     λ::T
     p0::T
 end
-densities(::PerimeterElasticity, R, dR, ddR) = sqrt(R^2 + dR^2)
-combine(t::PerimeterElasticity, Q, body) = t.λ * (Q[1] - t.p0 * sqrt(π) * body.R0)^2
-# optional, for speed: density_gradients(...) and combine_gradient(...)
+contour_integrands(::PerimeterElasticity, R, dR, ddR) = sqrt(R^2 + dR^2)
+energy(t::PerimeterElasticity, Q, body) = t.λ * (Q[1] - t.p0 * sqrt(π) * body.R0)^2
+# optional, for speed: contour_integrand_gradients(...) and energy_gradient(...)
 ```
 
 **Contact terms** (`ContactTerm`) give the energy density g(d) felt by a contour

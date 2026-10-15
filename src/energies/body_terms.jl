@@ -8,13 +8,13 @@ struct Tension{T} <: BodyTerm
     η::T
 end
 
-@inline densities(::Tension, R, dR, ddR) = sqrt(R^2 + dR^2)
-@inline combine(t::Tension, Q, b) = t.η * Q[1]
-@inline function density_gradients(::Tension, R, dR, ddR)
+@inline contour_integrands(::Tension, R, dR, ddR) = sqrt(R^2 + dR^2)
+@inline energy(t::Tension, Q, b) = t.η * Q[1]
+@inline function contour_integrand_gradients(::Tension, R, dR, ddR)
     s = sqrt(R^2 + dR^2)
     return (R / s, dR / s, zero(s))
 end
-@inline combine_gradient(t::Tension, Q, b) = SVector(t.η)
+@inline energy_gradient(t::Tension, Q, b) = SVector(t.η)
 
 """
     PerimeterElasticity(λ, p0)
@@ -29,5 +29,5 @@ struct PerimeterElasticity{T} <: BodyTerm
     p0::T
 end
 
-@inline densities(::PerimeterElasticity, R, dR, ddR) = sqrt(R^2 + dR^2)
-@inline combine(t::PerimeterElasticity, Q, b) = t.λ * (Q[1] - t.p0 * sqrt(oftype(t.p0, π)) * b.R0)^2
+@inline contour_integrands(::PerimeterElasticity, R, dR, ddR) = sqrt(R^2 + dR^2)
+@inline energy(t::PerimeterElasticity, Q, b) = t.λ * (Q[1] - t.p0 * sqrt(oftype(t.p0, π)) * b.R0)^2

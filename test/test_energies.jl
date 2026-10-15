@@ -1,4 +1,4 @@
-using FourierContourCells: ad_density_gradients, ad_combine_gradient, as_jacobian
+using FourierContourCells: ad_contour_integrand_gradients, ad_energy_gradient, as_jacobian
 using StaticArrays
 
 # User-defined term used to exercise the AD path and R'' dependence:
@@ -6,8 +6,14 @@ using StaticArrays
 struct Bending{T} <: BodyTerm
     κb::T
 end
-FourierContourCells.densities(::Bending, R, dR, ddR) = (R^2 + 2dR^2 - R * ddR)^2 / (R^2 + dR^2)^(5 / 2)
-FourierContourCells.combine(t::Bending, Q, b) = t.κb * Q[1]
+FourierContourCells.contour_integrands(::Bending, R, dR, ddR) = (R^2 + 2dR^2 - R * ddR)^2 / (R^2 + dR^2)^(5 / 2)
+FourierContourCells.energy(t::Bending, Q, b) = t.κb * Q[1]
+
+# Integrand-only term: energy defaults to sum(Q), i.e. η ∮ √(R² + R'²) dφ
+struct DensityOnlyTension{T} <: BodyTerm
+    η::T
+end
+FourierContourCells.contour_integrands(t::DensityOnlyTension, R, dR, ddR) = t.η * sqrt(R^2 + dR^2)
 
 "Single-body simulation with one deformed body; returns (sim, coef)."
 function single_body_sim(terms; θ = 0.4, R0 = 1.2, nθ = 40, type = 1, ntypes = 1)
@@ -40,10 +46,10 @@ end
     @testset "manual vs AD derivatives (Tension)" begin
         t = Tension(0.3)
         for (R, dR, ddR) in ((1.0, 0.0, 0.0), (0.9, 0.2, -0.5), (1.3, -0.4, 0.1))
-            @test as_jacobian(density_gradients(t, R, dR, ddR)) ≈ ad_density_gradients(ForwardDiffAD(), t, R, dR, ddR)
+            @test as_jacobian(contour_integrand_gradients(t, R, dR, ddR)) ≈ ad_contour_integrand_gradients(ForwardDiffAD(), t, R, dR, ddR)
         end
         Q = SVector(6.5)
-        @test combine_gradient(t, Q, BodyInfo(1.0, Int32(1))) ≈ ad_combine_gradient(ForwardDiffAD(), t, Q, BodyInfo(1.0, Int32(1)))
+        @test energy_gradient(t, Q, BodyInfo(1.0, Int32(1))) ≈ ad_energy_gradient(ForwardDiffAD(), t, Q, BodyInfo(1.0, Int32(1)))
     end
 
     @testset "circle energies" begin
@@ -58,6 +64,7 @@ end
             ("Tension", Tension(0.37)),
             ("PerimeterElasticity (AD)", PerimeterElasticity(0.5, 3.9)),
             ("Bending (user term, AD, uses R'')", Bending(0.2)),
+            ("integrand-only term (default energy)", DensityOnlyTension(0.37)),
         )
         sim, coef = single_body_sim((term,))
         refresh!(sim)
@@ -65,6 +72,15 @@ end
         @test g ≈ fd_shape_gradient(sim, coef) rtol = 1e-6
         # single-body terms exert no force or torque
         @test sim.grad.gx[1] == 0 && sim.grad.gy[1] == 0 && sim.grad.gθ[1] == 0
+    end
+
+    @testset "default energy is the sum of contour integrals" begin
+        simA, _ = single_body_sim((Tension(0.37),))
+        simB, _ = single_body_sim((DensityOnlyTension(0.37),))
+        refresh!(simA)
+        refresh!(simB)
+        @test body_energy(simB) ≈ body_energy(simA)
+        @test Array(simB.grad.gcoef) ≈ Array(simA.grad.gcoef)
     end
 
     @testset "OnTypes restricts terms" begin

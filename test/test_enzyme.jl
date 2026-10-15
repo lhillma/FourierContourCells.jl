@@ -4,8 +4,8 @@ using Enzyme
 struct EnzymeBending{T} <: BodyTerm
     κb::T
 end
-FourierContourCells.densities(::EnzymeBending, R, dR, ddR) = densities(Bending(1.0), R, dR, ddR)
-FourierContourCells.combine(t::EnzymeBending, Q, b) = t.κb * Q[1]
+FourierContourCells.contour_integrands(::EnzymeBending, R, dR, ddR) = contour_integrands(Bending(1.0), R, dR, ddR)
+FourierContourCells.energy(t::EnzymeBending, Q, b) = t.κb * Q[1]
 FourierContourCells.ad_backend(::EnzymeBending) = EnzymeAD()
 
 @testset "Enzyme extension" begin

@@ -51,20 +51,20 @@ end
 
 @inline function _body_term!(term, GR, GD, GDD, R, dR, ddR, i, info, nθ, Δφ)
     applies_to(term, info.type) || return zero(eltype(GR))
-    Q = as_svector(densities(term, R[1, i], dR[1, i], ddR[1, i]))
+    Q = as_svector(contour_integrands(term, R[1, i], dR[1, i], ddR[1, i]))
     for k in 2:nθ
-        Q += as_svector(densities(term, R[k, i], dR[k, i], ddR[k, i]))
+        Q += as_svector(contour_integrands(term, R[k, i], dR[k, i], ddR[k, i]))
     end
     Q *= Δφ
-    w = as_svector(combine_gradient(term, Q, info)) * Δφ
+    w = as_svector(energy_gradient(term, Q, info)) * Δφ
     for k in 1:nθ
-        J = as_jacobian(density_gradients(term, R[k, i], dR[k, i], ddR[k, i]))
+        J = as_jacobian(contour_integrand_gradients(term, R[k, i], dR[k, i], ddR[k, i]))
         g = J' * w
         GR[k, i] += g[1]
         GD[k, i] += g[2]
         GDD[k, i] += g[3]
     end
-    return combine(term, Q, info)
+    return energy(term, Q, info)
 end
 
 @kernel function body_terms_kernel!(GR, GD, GDD, E, @Const(R), @Const(dR), @Const(ddR),

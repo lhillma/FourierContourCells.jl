@@ -1,15 +1,16 @@
 # Energy-term interface
 #
-# Two kinds of terms exist, both differentiated with respect to the contour
-# samples R(φₖ), R'(φₖ), R''(φₖ) (and the body centre). The library maps these
-# contour gradients to the dynamical variables (r, θ, aₙ, bₙ) via the chain
-# rule, see `gradients.jl`.
+# Two kinds of terms exist. Both are differentiated with respect to the contour
+# samples R(φₖ), R'(φₖ), R''(φₖ) at the quadrature nodes (and the body centre);
+# the library maps these contour gradients to the dynamical variables
+# (r, θ, aₙ, bₙ) via the chain rule, see `gradients.jl`. Users therefore never
+# deal with Fourier coefficients.
 #
-# 1. `BodyTerm`: single-body energy E = F(Q₁, …, Qₘ) with contour integrals
-#        Qⱼ = ∮ qⱼ(R, R', R'') dφ.
-#    Users define `densities` (the qⱼ) and `combine` (F). Derivatives come from
-#    automatic differentiation unless `density_gradients` / `combine_gradient`
-#    are defined by hand.
+# 1. `BodyTerm`: energy of a single body built from contour integrals,
+#        E = F(Q₁, …, Qₘ),   Qⱼ = ∮ qⱼ(R, R', R'') dφ.
+#    Users define the integrands qⱼ (`contour_integrands`) and the function F
+#    (`energy`). Derivatives come from automatic differentiation unless
+#    `contour_integrand_gradients` / `energy_gradient` are defined by hand.
 #
 # 2. `ContactTerm`: pair interaction acting on a body through its own contour.
 #    Users define the energy density `pressure(term, d, tᵢ, tⱼ, related)` felt by
@@ -23,19 +24,44 @@ abstract type EnergyTerm end
 """
     BodyTerm <: EnergyTerm
 
-Single-body energy E = F(Q₁, …, Qₘ), Qⱼ = ∮ qⱼ(R, R', R'') dφ. Required methods:
+Energy of a single body that depends on its shape only. It is written in two
+stages, which keeps user code small while allowing nonlinear energies:
 
-    densities(term, R, dR, ddR)   -> qⱼ as a Number (m = 1), Tuple or SVector
-    combine(term, Q::SVector, b::BodyInfo) -> F(Q)
+1. **Contour integrals.** [`contour_integrands`](@ref) returns the integrands
+   q₁, …, qₘ as functions of the local contour radius R(φ) and its derivatives
+   R' = dR/dφ, R'' = d²R/dφ². The library integrates them around the contour:
+   Qⱼ = ∮ qⱼ(R, R', R'') dφ. Useful integrands:
 
-Optional methods (default: automatic differentiation with [`ad_backend`](@ref)):
+   | quantity   | integrand q(R, R', R'')                       |
+   |:-----------|:----------------------------------------------|
+   | perimeter  | √(R² + R'²)                                   |
+   | area       | R²/2                                          |
+   | ∮ κ² ds    | (R² + 2R'² - R R'')² / (R² + R'²)^(5/2)        |
 
-    density_gradients(term, R, dR, ddR) -> ∂qⱼ/∂(R, R', R'') as an `m × 3`
+2. **Energy.** [`energy`](@ref) maps the integrals Q = (Q₁, …, Qₘ) (an
+   `SVector`) and per-body data [`BodyInfo`](@ref) (`R0`, `type`) to the
+   energy E = F(Q). It defaults to `sum(Q)`, so a term whose integrand already
+   is an energy density (E = ∮ e dφ) only needs `contour_integrands`.
+
+Example, a CPM-like perimeter elasticity λ(l - l₀)²:
+
+    struct MyPerimeter{T} <: BodyTerm
+        λ::T
+        l0::T
+    end
+    FourierContourCells.contour_integrands(::MyPerimeter, R, dR, ddR) = sqrt(R^2 + dR^2)  # Q[1] = l
+    FourierContourCells.energy(t::MyPerimeter, Q, body) = t.λ * (Q[1] - t.l0)^2
+
+Derivatives are obtained by automatic differentiation (backend chosen by
+[`ad_backend`](@ref)). For speed they can be provided by hand:
+
+    contour_integrand_gradients(term, R, dR, ddR) -> ∂qⱼ/∂(R, R', R''): an m × 3
         SMatrix, a 3-tuple (m = 1) or a tuple of 3-tuples
-    combine_gradient(term, Q, b)       -> ∂F/∂Q as SVector/Tuple/Number
-    applies_to(term, type)             -> whether the term acts on body type
+    energy_gradient(term, Q, body) -> ∂F/∂Qⱼ as SVector, Tuple or Number
 
-All methods must be allocation-free so they can run inside GPU kernels.
+[`applies_to`](@ref)`(term, type)` can restrict a term to body types (or wrap
+it in [`OnTypes`](@ref)). All methods must be allocation-free and type-stable,
+as they run inside (GPU) kernels.
 """
 abstract type BodyTerm <: EnergyTerm end
 
@@ -57,15 +83,35 @@ abstract type ContactTerm <: EnergyTerm end
 """
     BodyInfo(R0, type)
 
-Per-body data passed to [`combine`](@ref), e.g. to set a target area πR0².
+Per-body data passed to [`energy`](@ref): the radius scale `R0` (e.g. for a
+target area πR0²) and the body `type`.
 """
 struct BodyInfo{T}
     R0::T
     type::Int32
 end
 
-function densities end
-function combine end
+"""
+    contour_integrands(term::BodyTerm, R, dR, ddR) -> q or (q₁, …, qₘ)
+
+Integrands of the contour integrals Qⱼ = ∮ qⱼ dφ of a [`BodyTerm`](@ref), as
+functions of the contour radius `R`, `dR` = dR/dφ and `ddR` = d²R/dφ².
+"""
+function contour_integrands end
+
+"""
+    energy(term::BodyTerm, Q::SVector, body::BodyInfo) -> E
+
+Energy of one body from its contour integrals `Q` (see [`BodyTerm`](@ref)).
+Defaults to `sum(Q)`.
+"""
+energy(::BodyTerm, Q, body) = sum(Q)
+
+"""
+    pressure(term::ContactTerm, d, tᵢ, tⱼ, related) -> g
+
+Energy density of a [`ContactTerm`](@ref) at penetration depth `d`.
+"""
 function pressure end
 
 "Whether `term` acts on bodies of type `type` (default: all types)."
@@ -96,18 +142,18 @@ term type, e.g. `ad_backend(::MyTerm) = EnzymeAD()`.
 """
 ad_backend(::EnergyTerm) = ForwardDiffAD()
 
-density_gradients(term::BodyTerm, R, dR, ddR) = ad_density_gradients(ad_backend(term), term, R, dR, ddR)
-combine_gradient(term::BodyTerm, Q, b) = ad_combine_gradient(ad_backend(term), term, Q, b)
+contour_integrand_gradients(term::BodyTerm, R, dR, ddR) = ad_contour_integrand_gradients(ad_backend(term), term, R, dR, ddR)
+energy_gradient(term::BodyTerm, Q, b) = ad_energy_gradient(ad_backend(term), term, Q, b)
 
-function ad_density_gradients(::ForwardDiffAD, term, R, dR, ddR)
-    f(v) = as_svector(densities(term, v[1], v[2], v[3]))
+function ad_contour_integrand_gradients(::ForwardDiffAD, term, R, dR, ddR)
+    f(v) = as_svector(contour_integrands(term, v[1], v[2], v[3]))
     return ForwardDiff.jacobian(f, SVector(R, dR, ddR))
 end
 
-ad_combine_gradient(::ForwardDiffAD, term, Q, b) = ForwardDiff.gradient(q -> combine(term, q, b), Q)
+ad_energy_gradient(::ForwardDiffAD, term, Q, b) = ForwardDiff.gradient(q -> energy(term, q, b), Q)
 
-ad_density_gradients(::EnzymeAD, args...) = enzyme_missing()
-ad_combine_gradient(::EnzymeAD, args...) = enzyme_missing()
+ad_contour_integrand_gradients(::EnzymeAD, args...) = enzyme_missing()
+ad_energy_gradient(::EnzymeAD, args...) = enzyme_missing()
 enzyme_missing() = error("EnzymeAD requires `using Enzyme` to load the Enzyme extension")
 
 ## Normalisation of user return values
@@ -140,9 +186,9 @@ applies_to(t::OnTypes, type) = type in t.types && applies_to(t.term, type)
 is_body_term(t) = t isa BodyTerm || (t isa OnTypes && is_body_term(t.term))
 is_contact_term(t) = t isa ContactTerm || (t isa OnTypes && is_contact_term(t.term))
 
-densities(t::OnTypes, R, dR, ddR) = densities(t.term, R, dR, ddR)
-combine(t::OnTypes, Q, b) = combine(t.term, Q, b)
-density_gradients(t::OnTypes, R, dR, ddR) = density_gradients(t.term, R, dR, ddR)
-combine_gradient(t::OnTypes, Q, b) = combine_gradient(t.term, Q, b)
+contour_integrands(t::OnTypes, R, dR, ddR) = contour_integrands(t.term, R, dR, ddR)
+energy(t::OnTypes, Q, b) = energy(t.term, Q, b)
+contour_integrand_gradients(t::OnTypes, R, dR, ddR) = contour_integrand_gradients(t.term, R, dR, ddR)
+energy_gradient(t::OnTypes, Q, b) = energy_gradient(t.term, Q, b)
 pressure(t::OnTypes, d, ti, tj, rel) = pressure(t.term, d, ti, tj, rel)
 interaction_range(t::OnTypes) = interaction_range(t.term)

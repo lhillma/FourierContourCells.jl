@@ -33,10 +33,11 @@ include("visualization.jl")
 
 # geometry and state
 export FourierBasis, PeriodicBox, Bodies, BodyType, nbodies, ncoef, nmodes
-# energy interface
-export EnergyTerm, BodyTerm, ContactTerm, BodyInfo, OnTypes
-export densities, combine, density_gradients, combine_gradient, pressure, interaction_range,
-    applies_to, ad_backend, ForwardDiffAD, EnzymeAD
+# energy interface: types are exported; the methods users extend are public but
+# not exported (generic names), e.g. `FourierContourCells.energy(t::MyTerm, Q, b) = ...`
+export EnergyTerm, BodyTerm, ContactTerm, BodyInfo, OnTypes, ForwardDiffAD, EnzymeAD
+public contour_integrands, energy, contour_integrand_gradients, energy_gradient, pressure,
+    interaction_range, applies_to, ad_backend
 # built-in energy terms
 export Tension, PerimeterElasticity, Overlap, LinearRepulsion
 # simulation

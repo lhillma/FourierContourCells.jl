@@ -3,24 +3,24 @@
 #   julia -t auto --project=examples examples/custom_energy.jl
 #
 # Single-body terms are written as E = F(Q₁, …, Qₘ) with contour integrals
-# Qⱼ = ∮ qⱼ(R, R', R'') dφ: define `densities` (the qⱼ) and `combine` (F).
+# Qⱼ = ∮ qⱼ(R, R', R'') dφ: define `contour_integrands` (the qⱼ) and `energy` (F).
 # Derivatives come from automatic differentiation (ForwardDiff by default;
 # `ad_backend(::MyTerm) = EnzymeAD()` after `using Enzyme`), or can be written
-# by hand by adding `density_gradients` and `combine_gradient` methods.
+# by hand by adding `contour_integrand_gradients` and `energy_gradient` methods.
 #
 # Pair terms define the energy density g(d) felt by a contour point at
 # penetration depth d into a neighbour (d > 0 inside). No derivative is needed.
 
 using FourierContourCells
-import FourierContourCells: densities, combine, pressure, interaction_range
+import FourierContourCells: contour_integrands, energy, pressure, interaction_range
 using GLMakie
 
 # Bending rigidity κ ∮ curvature² ds, curvature from R, R', R''.
 struct Bending{T} <: BodyTerm
     κ::T
 end
-densities(::Bending, R, dR, ddR) = (R^2 + 2dR^2 - R * ddR)^2 / (R^2 + dR^2)^(5 / 2)
-combine(t::Bending, Q, body) = t.κ * Q[1]
+contour_integrands(::Bending, R, dR, ddR) = (R^2 + 2dR^2 - R * ddR)^2 / (R^2 + dR^2)^(5 / 2)
+energy(t::Bending, Q, body) = t.κ * Q[1]
 
 # Short-range adhesion: area of a cell lying within a band of width w outside a
 # neighbour lowers the energy by γ per unit area.

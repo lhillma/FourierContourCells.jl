@@ -1,4 +1,5 @@
 using FourierContourCells
+using FourierContourCells: contour_integrands, energy, contour_integrand_gradients, energy_gradient, pressure
 using LinearAlgebra
 using Random
 using Statistics
