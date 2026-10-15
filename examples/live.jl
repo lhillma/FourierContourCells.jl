@@ -13,4 +13,4 @@ sim = Simulation(bodies, box;
     energies = (Tension(0.01), Overlap(1.0)),
     dt = 0.005)
 
-live(sim; steps_per_frame = 50, color = :shape_index)
+FourierContourCells.live_view(sim; steps_per_frame = 50, color = :shape_index)

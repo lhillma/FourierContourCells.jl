@@ -36,4 +36,4 @@ sim = Simulation(bodies, box;
     types = (BodyType(v0 = 0.03, Dr = 0.01, μab = 0.1),),
     energies = (Tension(0.01), Bending(0.005), Overlap(1.0), BandAdhesion(0.05, 0.1)))
 
-live(sim; steps_per_frame = 50)
+FourierContourCells.live_view(sim; steps_per_frame = 50)

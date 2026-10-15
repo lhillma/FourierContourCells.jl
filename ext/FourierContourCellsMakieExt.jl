@@ -2,7 +2,7 @@ module FourierContourCellsMakieExt
 
 using FourierContourCells
 using FourierContourCells: to_host
-import FourierContourCells: cellview!, update_view!, cellplot, live, record_movie
+import FourierContourCells: cellview!, update_view!, cellplot, live_view, record_movie
 using Makie
 
 struct CellView{S, P}
@@ -101,7 +101,7 @@ function cellplot(sim; size = (800, 700), colorbar::Bool = true, kwargs...)
     return fig, view
 end
 
-function live(sim; steps_per_frame::Integer = 20, kwargs...)
+function live_view(sim; steps_per_frame::Integer = 20, kwargs...)
     fig, view = cellplot(sim; kwargs...)
     controls = GridLayout(fig[2, 1:end]; tellwidth = false)
     running = Observable(true)

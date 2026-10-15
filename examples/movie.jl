@@ -19,5 +19,5 @@ run!(sim, 20_000; every = 5_000, callback = s -> println("t = ", s.t))
 
 mkpath(joinpath(@__DIR__, "..", "output"))
 path = joinpath(@__DIR__, "..", "output", "soft_fluid.mp4")
-record_movie(sim, path; frames = 600, steps_per_frame = 100, framerate = 30)
+FourierContourCells.record_movie(sim, path; frames = 600, steps_per_frame = 100, framerate = 30)
 println("wrote ", path)

@@ -41,8 +41,8 @@ sim = Simulation(bodies, box;
 
 step!(sim, 10_000)
 shape_index(sim)                       # perimeter / √area per cell
-live(sim; steps_per_frame = 50)        # watch it run (run/pause, speed slider)
-record_movie(sim, "run.mp4"; frames = 300, steps_per_frame = 100)
+FourierContourCells.live_view(sim; steps_per_frame = 50)   # run/pause, speed slider
+FourierContourCells.record_movie(sim, "run.mp4"; frames = 300, steps_per_frame = 100)
 ```
 
 ## Model

@@ -27,16 +27,16 @@ Figure with one axis showing the simulation box; `kwargs` go to [`cellview!`](@r
 function cellplot end
 
 """
-    live(sim; steps_per_frame = 20, kwargs...)
+    FourierContourCells.live_view(sim; steps_per_frame = 20, kwargs...)
 
 Open an interactive window (GLMakie) that advances `sim` and redraws it until
 the window is closed. Includes a run/pause button and a slider for the number
 of steps per frame. `kwargs` go to [`cellplot`](@ref).
 """
-function live end
+function live_view end
 
 """
-    record_movie(sim, path; frames = 300, steps_per_frame = 20, framerate = 30, kwargs...)
+    FourierContourCells.record_movie(sim, path; frames = 300, steps_per_frame = 20, framerate = 30, kwargs...)
 
 Advance `sim` and write one frame every `steps_per_frame` steps to the video
 `path` (`.mp4`, `.mkv`, `.webm` or `.gif`). `kwargs` go to [`cellplot`](@ref).

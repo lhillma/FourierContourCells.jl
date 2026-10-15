@@ -44,6 +44,9 @@ export Simulation, step!, run!, compute_gradients!, hexagonal_monolayer, CPU
 # observables
 export perimeters, areas, shape_index, positions, unwrapped_positions, contours, body_energy
 # visualisation (Makie extension)
-export cellview!, update_view!, cellplot, live, record_movie
+export cellview!, update_view!, cellplot
+# public API with generic names, not exported: call them qualified,
+# e.g. `FourierContourCells.live_view(sim)`
+public live_view, record_movie
 
 end
