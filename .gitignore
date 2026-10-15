@@ -1,0 +1,12 @@
+# Julia depot (set via JULIA_DEPOT_PATH in flake.nix)
+/.julia/
+
+# Reference papers and original code: cited, not redistributed
+/reference/
+
+# Simulation output
+/output/
+*.mp4
+*.jld2
+
+.DS_Store
