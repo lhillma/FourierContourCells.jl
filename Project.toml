@@ -16,13 +16,16 @@ StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 
 [weakdeps]
 Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
+Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
 
 [extensions]
 FourierContourCellsEnzymeExt = "Enzyme"
+FourierContourCellsMakieExt = "Makie"
 
 [compat]
 Adapt = "4.7.4"
 Enzyme = "0.13"
+Makie = "0.24"
 ForwardDiff = "1.4.6"
 KernelAbstractions = "0.9.45"
 LinearAlgebra = "1.13.0"
