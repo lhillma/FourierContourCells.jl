@@ -49,52 +49,41 @@ end
 contact_range(terms::Tuple) = isempty(terms) ? 0.0 : maximum(interaction_range, terms)
 
 @kernel function contact_pressure_kernel!(P, @Const(x), @Const(y), @Const(R), @Const(lab),
-        @Const(rmax), @Const(R0), @Const(type), @Const(parent), @Const(perm), @Const(start),
-        @Const(stop), terms, Lx, Ly, ncx, ncy, wx, wy, K, Δφ, range)
+        @Const(rmax), @Const(R0), @Const(type), @Const(parent), @Const(nidx), @Const(ncount),
+        terms, Lx, Ly, K, Δφ, range)
     k, i = @index(Global, NTuple)
     s, c = sincos((k - 1) * Δφ)
-    xi = x[i]
-    yi = y[i]
-    ux = xi + R[k, i] * c
-    uy = yi + R[k, i] * s
+    ux = x[i] + R[k, i] * c
+    uy = y[i] + R[k, i] * s
     ti = type[i]
     pi_ = parent[i]
-    cx, cy = grid_coords(ncx, ncy, wx, wy, xi, yi)
-    rx = ifelse(ncx >= Int32(3), Int32(1), Int32(0))
-    ry = ifelse(ncy >= Int32(3), Int32(1), Int32(0))
     p = zero(eltype(P))
-    for oy in (-ry):ry, ox in (-rx):rx
-        nx = mod(cx + ox, ncx)
-        ny = mod(cy + oy, ncy)
-        cell = nx + ncx * ny + Int32(1)
-        for q in start[cell]:stop[cell]
-            j = perm[q]
-            j == i && continue
-            dx = minimum_image(ux - x[j], Lx)
-            dy = minimum_image(uy - y[j], Ly)
-            dist2 = dx^2 + dy^2
-            lim = rmax[j] + range
-            dist2 > lim^2 && continue
-            dist = sqrt(dist2)
-            d = contour_radius(lab, j, R0[j], K, atan(dy, dx)) - dist
-            p += _pressure(terms, d, ti, type[j], pi_ == parent[j])
-        end
+    for q in 1:ncount[i]
+        j = nidx[q, i]
+        dx = minimum_image(ux - x[j], Lx)
+        dy = minimum_image(uy - y[j], Ly)
+        dist2 = dx^2 + dy^2
+        lim = rmax[j] + range
+        dist2 > lim^2 && continue
+        dist = sqrt(dist2)
+        d = contour_radius(lab, j, R0[j], K, atan(dy, dx)) - dist
+        p += _pressure(terms, d, ti, type[j], pi_ == parent[j])
     end
     P[k, i] = p
 end
 
 """
-    contact_pressure!(P, terms, geom, bodies, cells, box, basis)
+    contact_pressure!(P, terms, geom, bodies, neighbors, box, basis)
 
 Sum of contact energy densities g at every contour node of every body.
 """
-function contact_pressure!(P, terms::Tuple, geom::Geometry, bodies::Bodies, cl::CellList,
+function contact_pressure!(P, terms::Tuple, geom::Geometry, bodies::Bodies, nl::NeighborList,
         box::PeriodicBox, basis::FourierBasis)
     T = eltype(P)
     backend = get_backend(P)
     contact_pressure_kernel!(backend, (basis.nθ, max(1, WORKGROUP ÷ basis.nθ)))(P, bodies.x,
-        bodies.y, geom.R, geom.lab, geom.rmax, bodies.R0, bodies.type, bodies.parent, cl.perm,
-        cl.start, cl.stop, terms, box.Lx, box.Ly, cl.ncx, cl.ncy, cl.wx, cl.wy, nmodes(basis),
-        basis.Δφ, T(contact_range(terms)); ndrange = (basis.nθ, nbodies(bodies)))
+        bodies.y, geom.R, geom.lab, geom.rmax, bodies.R0, bodies.type, bodies.parent, nl.idx,
+        nl.count, terms, box.Lx, box.Ly, nmodes(basis), basis.Δφ, T(contact_range(terms));
+        ndrange = (basis.nθ, nbodies(bodies)))
     return P
 end

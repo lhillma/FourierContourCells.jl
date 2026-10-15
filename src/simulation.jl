@@ -12,13 +12,14 @@ converted to element type `T` and moved to the KernelAbstractions `backend`.
   (default: `backend_rng(backend, seed)`)
 """
 mutable struct Simulation{T, Ba <: FourierBasis{T}, Bo <: Bodies, G <: Geometry,
-        Gr <: Gradients, CL <: CellList, BT <: Tuple, CT <: Tuple, TT <: Tuple, R, Mat}
+        Gr <: Gradients, CL <: CellList, NL <: NeighborList, BT <: Tuple, CT <: Tuple, TT <: Tuple, R, Mat}
     const basis::Ba
     const box::PeriodicBox{T}
     const bodies::Bo
     const geom::G
     const grad::Gr
     const cells::CL
+    const neighbors::NL
     const body_terms::BT
     const contact_terms::CT
     const types::TT
@@ -54,7 +55,8 @@ function Simulation(bodies::Bodies, box::PeriodicBox; types, energies = (), dt =
     rng = rng === nothing ? backend_rng(backend, seed) : rng
     noise = KernelAbstractions.zeros(backend, T, 3, nbodies(dev))
 
-    sim = Simulation(basis, box, dev, Geometry(basis, dev), Gradients(basis, dev), cells,
+    neighbors = NeighborList(nbodies(dev); backend)
+    sim = Simulation(basis, box, dev, Geometry(basis, dev), Gradients(basis, dev), cells, neighbors,
         body_terms, contact_terms, types, rng, noise, T(dt), zero(T), 0)
     enforce_shape!(dev, basis)
     update_geometry!(sim.geom, basis, dev)
@@ -70,17 +72,29 @@ backend_rng(::CPU, seed) = Random.Xoshiro(seed)
 nbodies(sim::Simulation) = nbodies(sim.bodies)
 
 """
+    update_neighbors!(sim)
+
+Rebuild the cell list and the per-body neighbour list for the current state.
+"""
+function update_neighbors!(sim::Simulation)
+    update_celllist!(sim.cells, sim.bodies)
+    update_neighbors!(sim.neighbors, sim.cells, sim.bodies, sim.geom.rmax, sim.box,
+        contact_range(sim.contact_terms))
+    return sim
+end
+
+"""
     compute_gradients!(sim)
 
 Evaluate ∂E/∂(r, θ, aₙ, bₙ) of all energy terms for the current state.
-Requires up-to-date geometry and cell list.
+Requires up-to-date geometry and neighbour lists (see [`update_neighbors!`](@ref)).
 """
 function compute_gradients!(sim::Simulation)
-    (; basis, box, bodies, geom, grad, cells) = sim
+    (; basis, box, bodies, geom, grad, neighbors) = sim
     reset!(grad)
     body_terms!(grad, sim.body_terms, geom, bodies, basis)
     if !isempty(sim.contact_terms)
-        contact_pressure!(grad.P, sim.contact_terms, geom, bodies, cells, box, basis)
+        contact_pressure!(grad.P, sim.contact_terms, geom, bodies, neighbors, box, basis)
         contact_gradient!(grad, geom, basis)
     end
     pullback!(grad, geom, bodies, basis)
@@ -94,7 +108,7 @@ Advance the simulation by `n` Euler–Maruyama steps.
 """
 function step!(sim::Simulation, n::Integer = 1)
     for _ in 1:n
-        update_celllist!(sim.cells, sim.bodies)
+        isempty(sim.contact_terms) || update_neighbors!(sim)
         compute_gradients!(sim)
         randn!(sim.rng, sim.noise)
         integrate!(sim.bodies, sim.grad, sim.noise, sim.types, sim.dt, sim.box, sim.basis)

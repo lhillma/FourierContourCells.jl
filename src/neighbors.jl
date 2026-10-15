@@ -61,3 +61,68 @@ function update_celllist!(cl::CellList, bodies::Bodies)
         ndrange = N)
     return cl
 end
+
+"""
+    NeighborList(N; capacity = 32, backend)
+
+Per-body list of potentially interacting bodies, stored as a padded
+`capacity × N` matrix `idx` with `count[i]` valid entries in column `i`.
+Body j is listed for body i if their centres are closer than
+rmax_i + rmax_j + range, which no contour point of i can reach otherwise.
+The capacity grows automatically when exceeded.
+"""
+mutable struct NeighborList{MI <: AbstractMatrix{Int32}, VI <: AbstractVector{Int32}}
+    idx::MI
+    count::VI
+end
+
+function NeighborList(N::Integer; capacity::Integer = 32, backend = CPU())
+    return NeighborList(KernelAbstractions.zeros(backend, Int32, capacity, N),
+        KernelAbstractions.zeros(backend, Int32, N))
+end
+
+capacity(nl::NeighborList) = size(nl.idx, 1)
+
+@kernel function neighbor_kernel!(idx, count, @Const(x), @Const(y), @Const(rmax), @Const(perm),
+        @Const(start), @Const(stop), Lx, Ly, ncx, ncy, wx, wy, range, cap)
+    i = @index(Global)
+    xi = x[i]
+    yi = y[i]
+    ri = rmax[i] + range
+    cx, cy = grid_coords(ncx, ncy, wx, wy, xi, yi)
+    rx = ifelse(ncx >= Int32(3), Int32(1), Int32(0))
+    ry = ifelse(ncy >= Int32(3), Int32(1), Int32(0))
+    n = Int32(0)
+    for oy in (-ry):ry, ox in (-rx):rx
+        cell = mod(cx + ox, ncx) + ncx * mod(cy + oy, ncy) + Int32(1)
+        for q in start[cell]:stop[cell]
+            j = perm[q]
+            j == i && continue
+            dx = minimum_image(xi - x[j], Lx)
+            dy = minimum_image(yi - y[j], Ly)
+            if dx^2 + dy^2 <= (ri + rmax[j])^2
+                n += Int32(1)
+                n <= cap && (idx[n, i] = j)
+            end
+        end
+    end
+    count[i] = n
+end
+
+"""
+    update_neighbors!(nl, cl, bodies, geom, box, range)
+
+Rebuild the neighbour list from the cell list `cl` (which must be current).
+"""
+function update_neighbors!(nl::NeighborList, cl::CellList, bodies::Bodies, rmax, box::PeriodicBox, range)
+    backend = get_backend(bodies.x)
+    T = eltype(bodies.x)
+    while true
+        neighbor_kernel!(backend, WORKGROUP)(nl.idx, nl.count, bodies.x, bodies.y, rmax, cl.perm,
+            cl.start, cl.stop, box.Lx, box.Ly, cl.ncx, cl.ncy, cl.wx, cl.wy, T(range),
+            Int32(capacity(nl)); ndrange = nbodies(bodies))
+        nmax = Int(maximum(nl.count))
+        nmax <= capacity(nl) && return nl
+        nl.idx = KernelAbstractions.zeros(backend, Int32, 2nmax, nbodies(bodies))
+    end
+end

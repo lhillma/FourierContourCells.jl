@@ -78,6 +78,11 @@ end
         @test sim.cells.ncx ≥ 3 && sim.cells.ncy ≥ 3
         @test count(>(0), sim.grad.P) > 100
         @test Array(sim.grad.P) ≈ brute_force_pressure(sim)
+        # neighbour list capacity grows when exceeded
+        sim.neighbors.idx = zeros(Int32, 2, nbodies(sim))
+        refresh!(sim)
+        @test size(sim.neighbors.idx, 1) ≥ maximum(sim.neighbors.count) > 2
+        @test Array(sim.grad.P) ≈ brute_force_pressure(sim)
     end
 
     @testset "two discs: overlap force vs exact" begin
