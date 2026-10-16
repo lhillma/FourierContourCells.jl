@@ -1,17 +1,17 @@
-# Prototype: cells with a nucleus.
+# Cells with a nucleus.
 #
 #   julia -t auto --project=examples examples/nucleus.jl          # live window
 #   julia -t auto --project=examples examples/nucleus.jl check    # headless run + diagnostics
-#        options: drag=relative|substrate  Jw=<own-nucleus wrap coupling>  k=<spring constant>
+#        options: drag=parent|substrate  Jw=<own-nucleus wrap coupling>  k=<bond constant>
 #                 ηn=<nucleus line tension>
 #   julia -t auto --project=examples examples/nucleus.jl movie    # writes output/nucleus.mp4
-#   julia -t auto --project=examples examples/nucleus.jl test     # isolated-pair checks
+#   julia -t auto --project=examples examples/nucleus.jl test     # pull-in (wetting) check
 #
 # Extension of the Fourier contour cell model of N. Saito and S. Ishihara,
 # Sci. Adv. 10, eadi8433 (2024), doi:10.1126/sciadv.adi8433.
 #
 # Model. Every cell (type 1) contains one nucleus (type 2), a Fourier contour
-# body of its own whose `parent` is the cell.
+# body of its own whose `parent` is the cell (`with_nuclei`).
 #
 #   - Overlap: overlap with any other cell or nucleus costs J > 0 per unit
 #     area. A cell and its own nucleus gain -Jw per unit overlap area
@@ -22,337 +22,102 @@
 #   - Activity: the nucleus has v0 = 0. Its orientation θ diffuses
 #     independently of the cell's (rotational noise Dr) but only sets the frame
 #     of its shape modes.
-#   - Anchoring: a harmonic spring E = (k/2) |r_n - r_c|² between the centres of
-#     nucleus and cell, a crude model of the cytoskeleton. The force acts on
-#     both centres (equal and opposite, minimum image).
-#   - Drag: the cell has drag ζ_c = 1/μ_c against the substrate; the nucleus
-#     has drag ζ_i = 1/μ_i against the cytoplasm, i.e. relative to its cell,
-#     with the reaction on the cell. The force balances
-#         ζ_c ṙ_c - ζ_i (ṙ_n - ṙ_c) = F_c,    ζ_i (ṙ_n - ṙ_c) = F_n
-#     give the explicit velocities
-#         ṙ_c = μ_c (F_c + F_n),    ṙ_n = ṙ_c + μ_i F_n.
-#     The cell carries its nucleus's forces with its own drag, so the spring
-#     is internal (its forces cancel in F_c + F_n) and only relaxes the
-#     nucleus towards the cell centre at rate μ_i k. An isolated cell moves at
-#     v0 with zero lag. Without relative drag (`drag = nothing`) both bodies
-#     have substrate drag, which slows an isolated cell to
-#     v0 μ_n / (μ_c + μ_n).
+#   - Anchoring: a harmonic bond E = (k/2) |r_n - r_c|² between the centres of
+#     nucleus and cell (`HarmonicBond`, `parent_bonds`), a crude model of the
+#     cytoskeleton.
+#   - Drag: the nucleus has drag against the cytoplasm, i.e. relative to its
+#     cell (`BodyType(drag = :parent)`): the cell bears the nucleus's forces
+#     and carries it along, so the bond is internal and only re-centres the
+#     nucleus at rate μr_n k. Substrate drag on the nucleus would double-count
+#     the friction of the cell's footprint (an isolated cell would move at
+#     v0/2).
 #   - Nucleus stiffness: a stronger line tension on type 2 than on type 1.
-#
-# Neither the spring nor the relative drag fits the current energy API
-# (BodyTerms depend on the shape only, ContactTerms on the penetration depth
-# only), so this script modifies the centre gradients between
-# `compute_gradients!` and the integrator in a custom time step. See the notes
-# at the end of the file.
 
 using FourierContourCells
 using GLMakie
-using KernelAbstractions
-using KernelAbstractions: @kernel, @index, @Const, get_backend
-using Random: Xoshiro, randn!
 
-const FCC = FourierContourCells
 const CELL, NUCLEUS = 1, 2
 
 # ---------------------------------------------------------------------------
-# Initial condition: one round nucleus of radius `ratio·R0` at every cell centre
+# Parameters: "soft fluid" cells of Saito & Ishihara (2024), Fig. 2C
 
-"""
-    with_nuclei(cells; ratio = 0.5, rng) -> (bodies, anchor)
+const WRAP = 2.0    # Jw, own-nucleus wrap coupling (> J: wins against neighbours)
+const BOND = 0.2    # k, nucleus–cell bond constant
 
-Append one nucleus per cell to the host `Bodies` `cells` (bodies 1:N are the
-cells, N+1:2N the nuclei, nucleus N+i belongs to cell i). `anchor[i]` is the
-spring partner of body i: the nucleus of a cell, the cell of a nucleus.
-"""
-function with_nuclei(cells::Bodies; ratio = 0.5, rng = Xoshiro(2))
-    N = nbodies(cells)
-    coef = hcat(cells.coef, repeat([1.0; zeros(size(cells.coef, 1) - 1)], 1, N))
-    bodies = Bodies([cells.x; cells.x], [cells.y; cells.y], [cells.θ; 2π .* rand(rng, N)], coef,
-        [cells.R0; ratio .* cells.R0]; type = [fill(CELL, N); fill(NUCLEUS, N)],
-        parent = [1:N; 1:N])
-    anchor = Int32[(N + 1):(2N); 1:N]
-    return bodies, anchor
+# Overlap couplings indexed (type_i, type_j); same-parent pairs use `related`.
+function energies(; Jw = WRAP, k = BOND, ηn = 0.05)
+    J = [1.0 1.0; 1.0 1.0]
+    Jrelated = [0.0 -Jw; -Jw 0.0]
+    return (OnTypes(Tension(0.01), CELL), OnTypes(Tension(ηn), NUCLEUS),
+        Overlap(J; related = Jrelated), HarmonicBond(k))
 end
+
+cell_type(; v0 = 0.06, Dr = 0.01) = BodyType(; v0, Dr, μab = 0.1)
+nucleus_type(; Dr = 0.01, drag = :parent) = BodyType(; v0 = 0.0, Dr, μab = 0.1, drag)
+
+function monolayer(; drag = :parent, kwargs...)
+    cells, box = hexagonal_monolayer(32, 32; packing = 0.95)
+    bodies = with_nuclei(cells; ratio = 0.5, type = NUCLEUS)
+    return Simulation(bodies, box; types = (cell_type(), nucleus_type(; drag)),
+        energies = energies(; kwargs...), bonds = parent_bonds(bodies), dt = 0.005)
+end
+
+# cells coloured by shape index, nuclei on top
+const LAYERS = ((types = CELL, color = :shape_index), (types = NUCLEUS, color = :steelblue))
 
 # ---------------------------------------------------------------------------
-# Spring between nucleus and cell centres
-
-struct CentreSpring{T}
-    k::T
-end
-
-# Add the gradient of the centre spring. One work item per body i.
-#
-# Each anchored pair (i, j = anchor[i]) has energy E = (k/2) |Δ|², Δ = rᵢ - rⱼ
-# (minimum image), so ∂E/∂rᵢ = k Δ. The partner j gets -k Δ from its own work
-# item (anchor is symmetric), so no atomics are needed. anchor[i] = 0: no spring.
-#
-#   gx, gy  (in/out) N, ∂E/∂x, ∂E/∂y (accumulated)
-#   x, y    N, wrapped body positions
-#   anchor  N, spring partner of each body (0: none)
-#   k       spring constant;  Lx, Ly: box size
-@kernel function centre_spring_kernel!(gx, gy, @Const(x), @Const(y), @Const(anchor), k, Lx, Ly)
-    i = @index(Global)
-    j = anchor[i]
-    if j > 0
-        gx[i] += k * FCC.minimum_image(x[i] - x[j], Lx)
-        gy[i] += k * FCC.minimum_image(y[i] - y[j], Ly)
-    end
-end
-
-function add_spring!(sim, s::CentreSpring, anchor)
-    b = sim.bodies
-    T = eltype(b.x)
-    centre_spring_kernel!(get_backend(b.x), 256)(sim.grad.gx, sim.grad.gy, b.x, b.y, anchor,
-        T(s.k), sim.box.Lx, sim.box.Ly; ndrange = nbodies(b))
-    return sim
-end
-
-"""
-    RelativeDrag(μi)
-
-Drag of a nucleus relative to its cell, with mobility `μi` (see the header).
-"""
-struct RelativeDrag{T}
-    μi::T
-end
-
-# Rewrite the centre gradients so that the integrator, which moves body i by
-# dt (v0 e(θᵢ) - μr gᵢ), produces the relative-drag velocities. One work item
-# per body i; g = ∂E/∂r = -F (spring included).
-#
-#   cell c with nucleus n:  g_c ← g_c + g_n, so that
-#       v_c = v0_c e(θ_c) - μ_c (g_c + g_n)
-#   nucleus n of cell c:    target v_n = v_c - μ_i g_n; the integrator gives
-#       v0_n e(θ_n) - μr_n g, so  g ← (v0_n e(θ_n) - v_n) / μr_n
-#   other bodies:           unchanged
-#
-# The work items read gradients of their partner, so the results go to
-# separate buffers (hx, hy) and are copied back afterwards. θ is read before
-# the integrator updates it. Translational noise (Dt) of the cell is not
-# passed on to the nucleus.
-#
-#   hx, hy      (out) N, rewritten ∂E/∂x, ∂E/∂y
-#   gx, gy      N, ∂E/∂x, ∂E/∂y from the energy terms and the spring
-#   θ, type     N, orientations and body types
-#   anchor      N, partner of each body (cell ↔ nucleus; 0: none)
-#   types       tuple of BodyType;  nucleus: type index of nuclei
-#   μi          mobility of a nucleus relative to its cell
-@kernel function relative_drag_kernel!(hx, hy, @Const(gx), @Const(gy), @Const(θ), @Const(type),
-        @Const(anchor), types, nucleus, μi)
-    i = @index(Global)
-    j = anchor[i]
-    if j == 0
-        hx[i] = gx[i]
-        hy[i] = gy[i]
-    elseif type[i] != nucleus
-        hx[i] = gx[i] + gx[j]
-        hy[i] = gy[i] + gy[j]
-    else
-        pc = types[type[j]]
-        pn = types[type[i]]
-        sc, cc = sincos(θ[j])
-        vx = pc.v0 * cc - pc.μr * (gx[j] + gx[i]) - μi * gx[i]
-        vy = pc.v0 * sc - pc.μr * (gy[j] + gy[i]) - μi * gy[i]
-        sn, cn = sincos(θ[i])
-        hx[i] = (pn.v0 * cn - vx) / pn.μr
-        hy[i] = (pn.v0 * sn - vy) / pn.μr
-    end
-end
-
-"Work buffers for `relative_drag!`."
-drag_buffers(sim) = (similar(sim.bodies.x), similar(sim.bodies.x))
-
-function relative_drag!(sim, d::RelativeDrag, anchor, (hx, hy))
-    b, g = sim.bodies, sim.grad
-    T = eltype(b.x)
-    relative_drag_kernel!(get_backend(b.x), 256)(hx, hy, g.gx, g.gy, b.θ, b.type, anchor,
-        sim.types, Int32(NUCLEUS), T(d.μi); ndrange = nbodies(b))
-    copyto!(g.gx, hx)
-    copyto!(g.gy, hy)
-    return sim
-end
-
-"""
-    NucleusModel(spring, drag, anchor, buffers)
-
-Everything the custom time step adds to `sim`: the centre spring, the
-relative drag (`nothing`: substrate drag for nuclei too), the partner table
-(on the backend) and work buffers. Build with [`nucleus_model`](@ref).
-"""
-struct NucleusModel{S, D, A, B}
-    spring::S
-    drag::D
-    anchor::A
-    buffers::B
-end
-
-"Set up a `NucleusModel` for `sim` from the host partner table of `with_nuclei`."
-function nucleus_model(sim, spring, drag, anchor_host)
-    anchor = FCC.to_backend(get_backend(sim.bodies.x), anchor_host)
-    return NucleusModel(spring, drag, anchor, drag_buffers(sim))
-end
-
-# Time step: a copy of `FourierContourCells.step!` with the spring and the
-# relative drag inserted after the energy gradients. Uses internal
-# (non-public) functions.
-function nucleus_step!(sim, m::NucleusModel, n::Integer = 1)
-    for _ in 1:n
-        isempty(sim.contact_terms) || FCC.update_neighbors!(sim)
-        compute_gradients!(sim)
-        add_spring!(sim, m.spring, m.anchor)
-        m.drag === nothing || relative_drag!(sim, m.drag, m.anchor, m.buffers)
-        randn!(sim.rng, sim.noise)
-        FCC.integrate!(sim.bodies, sim.grad, sim.noise, sim.types, sim.dt, sim.box, sim.basis)
-        FCC.update_geometry!(sim.geom, sim.basis, sim.bodies)
-        sim.t += sim.dt
-        sim.step += 1
-    end
-    return sim
-end
-
-# ---------------------------------------------------------------------------
-# Diagnostics (host side)
-
-"""
-Per nucleus: centre offset |r_n - r_c| from its cell, and protrusion
-max_k (|u_k - r_c| - R_c(ψ_k)) of its contour nodes u_k beyond the cell
-contour (> 0: the nucleus pokes out of its cell).
-"""
-function nucleus_diagnostics(sim)
-    b = FCC.to_host(sim.bodies)
-    R = Array(sim.geom.R)
-    lab = Array(sim.geom.lab)
-    K = nmodes(sim.basis)
-    Lx, Ly = sim.box.Lx, sim.box.Ly
-    nuclei = findall(==(NUCLEUS), b.type)
-    offset = zeros(length(nuclei))
-    protrusion = zeros(length(nuclei))
-    for (q, n) in enumerate(nuclei)
-        c = b.parent[n]
-        offset[q] = hypot(FCC.minimum_image(b.x[n] - b.x[c], Lx), FCC.minimum_image(b.y[n] - b.y[c], Ly))
-        p = -Inf
-        for k in 1:(sim.basis.nθ)
-            φ = FCC.node_angle(sim.basis, k)
-            dx = FCC.minimum_image(b.x[n] + R[k, n] * cos(φ) - b.x[c], Lx)
-            dy = FCC.minimum_image(b.y[n] + R[k, n] * sin(φ) - b.y[c], Ly)
-            p = max(p, hypot(dx, dy) - FCC.contour_radius(lab, c, b.R0[c], K, atan(dy, dx)))
-        end
-        protrusion[q] = p
-    end
-    return (; offset, protrusion)
-end
+# Diagnostics
 
 mean(v) = sum(v) / length(v)
 
+"Centre offset |r_n - r_c| of every nucleus from its cell (host)."
+function nucleus_offsets(sim)
+    b = FourierContourCells.to_host(sim.bodies)
+    mi = FourierContourCells.minimum_image
+    return [hypot(mi(b.x[n] - b.x[b.parent[n]], sim.box.Lx), mi(b.y[n] - b.y[b.parent[n]], sim.box.Ly))
+            for n in findall(==(NUCLEUS), b.type)]
+end
+
 function report(sim)
-    d = nucleus_diagnostics(sim)
-    p = Array(shape_index(sim))
-    typ = Array(sim.bodies.type)
+    d = nucleus_offsets(sim)
+    pr = protrusion(sim; type = NUCLEUS)
     println("t = ", round(sim.t; digits = 1),
-        "  offset mean/max = ", round(mean(d.offset); digits = 3), "/", round(maximum(d.offset); digits = 3),
-        "  protruding nuclei = ", count(>(0), d.protrusion), " (max ", round(maximum(d.protrusion); digits = 3), ")",
-        "  ⟨p⟩ cells/nuclei = ", round(mean(p[typ .== CELL]); digits = 3), "/",
-        round(mean(p[typ .== NUCLEUS]); digits = 3))
+        "  offset mean/max = ", round(mean(d); sigdigits = 2), "/", round(maximum(d); digits = 3),
+        "  protruding nuclei = ", count(>(0), pr), " (max ", round(maximum(pr); digits = 3), ")",
+        "  ⟨p⟩ cells/nuclei = ", round(mean(Array(shape_index(sim; type = CELL))); digits = 3), "/",
+        round(mean(Array(shape_index(sim; type = NUCLEUS))); digits = 3))
 end
 
 """
 Shape statistics per body type, to detect artefacts such as wetting or
 excited high modes: mean amplitude |cₙ| = √(aₙ² + bₙ²) of each mode n, mean
-and maximum shape index, and the area range relative to πR0² (fixed by the
-hard area constraint up to quadrature error).
+and maximum shape index, and the area range relative to πR0².
 """
 function shape_report(sim)
     coef = Array(sim.bodies.coef)
     typ = Array(sim.bodies.type)
     K = nmodes(sim.basis)
-    p = Array(shape_index(sim))
-    A = Array(areas(sim)) ./ (π .* Array(sim.bodies.R0) .^ 2)
     for (t, name) in ((CELL, "cells "), (NUCLEUS, "nuclei"))
         sel = typ .== t
-        amp = [mean(sqrt.(coef[1 + m, sel] .^ 2 .+ coef[1 + K + m, sel] .^ 2)) for m in 1:K]
+        amp = [mean(hypot.(coef[1 + m, sel], coef[1 + K + m, sel])) for m in 1:K]
+        p = Array(shape_index(sim; type = t))
+        A = Array(areas(sim; type = t)) ./ (π .* Array(sim.bodies.R0)[sel] .^ 2)
         println("  ", name, "  ⟨|cₙ|⟩ n = 2…", K + 1, ": ", join(round.(amp; sigdigits = 2), " "),
-            "   p mean/max = ", round(mean(p[sel]); digits = 3), "/", round(maximum(p[sel]); digits = 3),
-            "   A/πR0² ∈ [", round(minimum(A[sel]); digits = 4), ", ", round(maximum(A[sel]); digits = 4), "]")
+            "   p mean/max = ", round(mean(p); digits = 3), "/", round(maximum(p); digits = 3),
+            "   A/πR0² ∈ [", round(minimum(A); digits = 4), ", ", round(maximum(A); digits = 4), "]")
     end
 end
 
-# ---------------------------------------------------------------------------
-# Plotting: cells coloured by shape index, nuclei drawn on top in one colour
-# (their value lies above the colour range and is shown with `highclip`).
-
-const PRANGE = (3.545f0, 4.2f0)
-cell_colors(sim) = ifelse.(Array(sim.bodies.type) .== CELL, min.(Array(shape_index(sim)), PRANGE[2]), 10.0)
-
-function nucleus_plot(sim)
-    return cellplot(sim; color = cell_colors, colorrange = PRANGE,
-        colormap = Makie.cgrad([:gray85, :firebrick]), highclip = :steelblue)
-end
-
-# `live_view` and `record_movie` call `step!`, which knows nothing about the
-# spring and the drag, so the loops are rewritten here.
-function nucleus_live(sim, m; steps_per_frame = 50)
-    fig, view = nucleus_plot(sim)
-    screen = display(fig)
-    while isopen(screen)
-        nucleus_step!(sim, m, steps_per_frame)
-        update_view!(view)
-        sleep(1 / 120)
-    end
-end
-
-function nucleus_movie(sim, m, path; frames = 600, steps_per_frame = 100)
-    fig, view = nucleus_plot(sim)
-    record(fig, path, 1:frames; framerate = 30) do _
-        nucleus_step!(sim, m, steps_per_frame)
-        update_view!(view)
-    end
-    return path
+"Mean cell displacement |Δr| since the unwrapped positions `X0`."
+function mean_cell_displacement(sim, X0)
+    Δ = (unwrapped_positions(sim) .- X0)[:, Array(sim.bodies.type) .== CELL]
+    return mean(vec(sqrt.(sum(abs2, Δ; dims = 1))))
 end
 
 # ---------------------------------------------------------------------------
-# Parameters: "soft fluid" cells of Saito & Ishihara (2024), Fig. 2C
-
-# Overlap couplings indexed (type_i, type_j); same-parent pairs use `related`.
-# Jw > 0 makes cell and own nucleus gain -Jw per unit overlap area, so the
-# membrane wraps the nucleus and protruding parts are pulled back. A nucleus
-# fully inside its cell feels no force from it: its contour sees a uniform
-# pressure, which the hard area constraint cancels exactly.
-function energies(; Jw = WRAP, ηn = 0.05)
-    J = [1.0 1.0; 1.0 1.0]
-    Jrelated = [0.0 -Jw; -Jw 0.0]
-    return (OnTypes(Tension(0.01), CELL), OnTypes(Tension(ηn), NUCLEUS),
-        Overlap(J; related = Jrelated))
-end
-cell_type(; v0 = 0.06, Dr = 0.01) = BodyType(; v0, Dr, μab = 0.1)
-nucleus_type(; Dr = 0.01) = BodyType(; v0 = 0.0, Dr, μab = 0.1)
-const WRAP = 2.0                # Jw, own-nucleus wrap coupling (> J: wins against neighbours)
-const SPRING = CentreSpring(0.2)
-const DRAG = RelativeDrag(1.0)
-
-# ---------------------------------------------------------------------------
-# Checks on an isolated cell–nucleus pair (no noise, no contacts)
-
-"Cell at the box centre, nucleus displaced by `δ0` along x; orientation θ = 0."
-function isolated_pair(; v0, drag, δ0 = 0.0, L = 20.0, Jw = 0.0, ηn = 0.05, spring = SPRING)
-    cells = Bodies([L / 2], [L / 2], [0.0], [1.0; zeros(10)][:, :], [1.0])
-    bodies, anchor = with_nuclei(cells)
-    bodies.x[2] += δ0
-    bodies.θ[2] = 0.0
-    sim = Simulation(bodies, PeriodicBox(L, L); types = (cell_type(; v0, Dr = 0.0),
-        nucleus_type(; Dr = 0.0)), energies = energies(; Jw, ηn), dt = 0.005)
-    return sim, nucleus_model(sim, spring, drag, anchor)
-end
-
-"Run `t` time units; return cell speed (last half) and final lag x_c - x_n."
-function drift(sim, m, t)
-    nhalf = round(Int, t / 2 / sim.dt)
-    nucleus_step!(sim, m, nhalf)
-    x0 = unwrapped_positions(sim)[1, 1]
-    nucleus_step!(sim, m, nhalf)
-    X = unwrapped_positions(sim)
-    return (X[1, 1] - x0) / (nhalf * sim.dt), X[1, 1] - X[1, 2]
-end
+# Pull-in check: a soft nucleus starting half outside its cell, without bond.
+# The wrap coupling must pull it in without wetting artefacts (excited modes,
+# irregular shape); without it the nucleus stays where it is.
 
 function check(name, value, expected; atol)
     ok = isapprox(value, expected; atol)
@@ -360,139 +125,85 @@ function check(name, value, expected; atol)
     return ok
 end
 
+function pull_in(; Jw, t = 50.0)
+    cell = Bodies([10.0], [10.0], [0.0], [1.0; zeros(10);;], [1.0])
+    bodies = with_nuclei(cell; type = NUCLEUS)
+    bodies.x[2] += 0.7          # 0.2 R₀ outside the cell contour
+    sim = Simulation(bodies, PeriodicBox(20.0, 20.0); types = (cell_type(; v0 = 0.0, Dr = 0.0),
+        nucleus_type(; Dr = 0.0)), energies = energies(; Jw, k = 0.0, ηn = 0.005), dt = 0.005)
+    step!(sim, round(Int, t / sim.dt))
+    return sim
+end
+
 function run_tests()
-    v0, k, μi = 0.06, SPRING.k, DRAG.μi
     ok = true
-    println("isolated pair, relative drag: the composite moves at v0, no lag")
-    sim, m = isolated_pair(; v0, drag = DRAG)
-    V, δ = drift(sim, m, 100.0)
-    ok &= check("speed", V, v0; atol = 1e-12)
-    ok &= check("lag", δ, 0.0; atol = 1e-12)
-
-    println("isolated pair, substrate drag: V = v0/2, lag v0/(2k)")
-    sim, m = isolated_pair(; v0, drag = nothing)
-    V, δ = drift(sim, m, 100.0)
-    ok &= check("speed", V, v0 / 2; atol = 1e-9)
-    ok &= check("lag", δ, v0 / (2k); atol = 1e-9)
-
-    println("relaxation, relative drag: the spring is internal, the cell stays put")
-    δ0, n = 0.1, 400
-    sim, m = isolated_pair(; v0 = 0.0, drag = DRAG, δ0)
-    xc = sim.bodies.x[1]
-    nucleus_step!(sim, m, n)
-    ok &= check("cell displacement", sim.bodies.x[1] - xc, 0.0; atol = 1e-14)
-    # explicit Euler of δ̇ = -μi k δ
-    ok &= check("nucleus offset", sim.bodies.x[2] - sim.bodies.x[1], δ0 * (1 - μi * k * sim.dt)^n;
-        atol = 1e-14)
-
-    # A soft nucleus starting half outside its cell, without spring. The wrap
-    # coupling must pull it in without wetting artefacts (excited modes,
-    # irregular shape); without it the nucleus stays where it is.
-    for Jw in (0.0, WRAP)
-        println("pull-in, Jw = $Jw: soft nucleus starting 0.2 R₀ outside, no spring")
-        sim, m = isolated_pair(; v0 = 0.0, drag = DRAG, δ0 = 0.7, Jw, ηn = 0.005,
-            spring = CentreSpring(0.0))
-        nucleus_step!(sim, m, round(Int, 50 / sim.dt))
-        d = nucleus_diagnostics(sim)
-        if Jw == 0
-            ok &= check("protrusion", d.protrusion[1], 0.2; atol = 1e-12)
-        else
-            K = nmodes(sim.basis)
-            c = Array(sim.bodies.coef)
-            amp = maximum(hypot(c[1 + q, 2], c[1 + K + q, 2]) for q in 1:K)
-            ok &= check("protrusion (positive part)", max(d.protrusion[1], 0.0), 0.0; atol = 1e-3)
-            ok &= check("largest nucleus mode amplitude", amp, 0.0; atol = 0.01)
-            ok &= check("nucleus shape index", Array(shape_index(sim))[2], 2sqrt(π); atol = 1e-3)
-        end
-    end
+    println("pull-in, Jw = 0: soft nucleus starting 0.2 R₀ outside, no bond")
+    ok &= check("protrusion", protrusion(pull_in(; Jw = 0.0))[2], 0.2; atol = 1e-12)
+    println("pull-in, Jw = $WRAP")
+    sim = pull_in(; Jw = WRAP)
+    K = nmodes(sim.basis)
+    c = Array(sim.bodies.coef)
+    ok &= check("protrusion (positive part)", max(protrusion(sim)[2], 0.0), 0.0; atol = 1e-3)
+    ok &= check("largest nucleus mode amplitude", maximum(hypot(c[1 + q, 2], c[1 + K + q, 2]) for q in 1:K),
+        0.0; atol = 0.01)
+    ok &= check("nucleus shape index", Array(shape_index(sim))[2], 2sqrt(π); atol = 1e-3)
     ok || error("nucleus checks failed")
     return nothing
 end
 
 # ---------------------------------------------------------------------------
-# Monolayer
-
-function monolayer(; drag = DRAG, Jw = WRAP, k = SPRING.k, ηn = 0.05)
-    cells, box = hexagonal_monolayer(32, 32; packing = 0.95)
-    bodies, anchor = with_nuclei(cells; ratio = 0.5)
-    sim = Simulation(bodies, box; types = (cell_type(), nucleus_type()), energies = energies(; Jw, ηn),
-        dt = 0.005)
-    return sim, nucleus_model(sim, CentreSpring(k), drag, anchor)
-end
-
-"Mean cell displacement |Δr| over the whole run, for comparing drag models."
-mean_cell_displacement(sim, X0) =
-    mean(vec(sqrt.(sum(abs2, (unwrapped_positions(sim) .- X0)[:, Array(sim.bodies.type) .== CELL]; dims = 1))))
 
 mode = get(ARGS, 1, "live")
 if mode == "test"
     run_tests()
 elseif mode == "check"
-    # options as key=value: drag=relative|substrate, Jw=<wrap coupling>, k=<spring>
     opts = Dict(Pair(split(a, "=")...) for a in ARGS[2:end])
-    drag = get(opts, "drag", "relative") == "substrate" ? nothing : DRAG
+    drag = Symbol(get(opts, "drag", "parent"))
     Jw = parse(Float64, get(opts, "Jw", string(WRAP)))
-    k = parse(Float64, get(opts, "k", string(SPRING.k)))
+    k = parse(Float64, get(opts, "k", string(BOND)))
     ηn = parse(Float64, get(opts, "ηn", "0.05"))
-    println("drag = ", drag === nothing ? "substrate" : "relative", ", Jw = ", Jw, ", k = ", k, ", ηn = ", ηn)
-    sim, m = monolayer(; drag, Jw, k, ηn)
+    println("drag = ", drag, ", Jw = ", Jw, ", k = ", k, ", ηn = ", ηn)
+    sim = monolayer(; drag, Jw, k, ηn)
     X0 = unwrapped_positions(sim)
     for _ in 1:10
-        nucleus_step!(sim, m, 2_000)
+        step!(sim, 2_000)
         report(sim)
     end
     shape_report(sim)
     println("mean cell displacement: ", round(mean_cell_displacement(sim, X0); digits = 3))
     mkpath(joinpath(@__DIR__, "..", "output"))
-    path = joinpath(@__DIR__, "..", "output", "nucleus_Jw$(Jw)_k$(k)_eta$(ηn).png")
-    save(path, first(nucleus_plot(sim)))
+    path = joinpath(@__DIR__, "..", "output", "nucleus_$(drag)_Jw$(Jw)_k$(k)_eta$(ηn).png")
+    save(path, first(cellplot(sim; layers = LAYERS)))
     println("wrote ", path)
 elseif mode == "movie"
-    sim, m = monolayer()
-    nucleus_step!(sim, m, 20_000)
+    sim = monolayer()
+    step!(sim, 20_000)
     mkpath(joinpath(@__DIR__, "..", "output"))
-    println("wrote ", nucleus_movie(sim, m, joinpath(@__DIR__, "..", "output", "nucleus.mp4")))
+    path = joinpath(@__DIR__, "..", "output", "nucleus.mp4")
+    println("wrote ", FourierContourCells.record_movie(sim, path; frames = 600, steps_per_frame = 100,
+        layers = LAYERS))
 elseif mode == "live"
-    sim, m = monolayer()
-    nucleus_live(sim, m)
+    FourierContourCells.live_view(monolayer(); steps_per_frame = 50, layers = LAYERS)
 end
 
 # ---------------------------------------------------------------------------
 # Notes from this prototype (extensibility test of the library)
 #
-# Library friction, roughly by importance:
+# The first version of this script needed its own kernels, a hand-copied
+# `step!`, rewritten viewer loops and a colour-map trick. Library additions
+# that came out of it: `BodyType(drag = :parent)`, `BondTerm`/`HarmonicBond`
+# with `Simulation(...; bonds)` and `parent_bonds`, the prototyping
+# `hook!` keyword, `with_nuclei`, `vcat(::Bodies...)`, `protrusion`, `type =`
+# filters on observables, plot `layers`, and public kernel helpers.
 #
-# 1. No way to add centre-based (bonded) interactions. BodyTerms see only the
-#    shape, ContactTerms only the penetration depth. The spring therefore
-#    needs a hand-copied `step!` (`nucleus_step!`) built from non-public
-#    functions (`update_neighbors!`, `integrate!`, `update_geometry!`), which
-#    silently diverges if `step!` changes. Candidates: a third term kind
-#    (e.g. `BondTerm` with a bond list, E(rᵢ - rⱼ)), or a force hook in `step!`.
-#    The relative drag is not an energy at all but a change of the mobility
-#    (velocities from forces), so it needs the same hook, or a per-type
-#    option "drag relative to parent" in the integrator. Emulating it by
-#    rewriting gradients works (the integrator is r += dt (v0 e - μr g)) but
-#    needs scratch buffers and couples the script to the integrator's form.
-# 2. `live_view` / `record_movie` hard-code `step!`, so both loops are
-#    rewritten here. This would be solved by 1, or by a `step` keyword.
-# 3. No parent → child lookup: `Bodies.parent` maps nucleus → cell only; the
-#    symmetric `anchor` table is built by hand.
-# 4. No helper to combine body sets (`vcat` of `Bodies`) or to build cells
-#    with nuclei; `with_nuclei` copies fields by hand.
-# 5. Plotting cannot style bodies by type: cells and nuclei share one colour
-#    map, so nuclei are drawn via an out-of-range value plus `highclip`, and
-#    the cell values must be clamped. Candidates: per-type colours or styles,
-#    or a body subset in `cellview!`.
-# 6. Writing a kernel needs KernelAbstractions as a direct dependency of the
-#    script and internals such as `minimum_image`, `node_angle`,
-#    `contour_radius`, `to_host`, `to_backend` and `WORKGROUP`; none is
-#    public.
-# 7. Observables mix types (`shape_index` covers cells and nuclei together);
-#    `nucleus_diagnostics` (offset, protrusion) is a candidate observable.
-# 8. Cost: 7.7 ms/step for 1024 cells + 1024 nuclei vs 3.0 ms/step for the
-#    cells alone (16 threads). Nuclei enter the neighbour lists of nearby
-#    cells, and the contact kernel still evaluates every cell–own-nucleus
-#    pair although its coupling is 0.
+# Remaining friction:
+#
+# - Cost: 1024 cells + 1024 nuclei take 2.2× the time of the cells alone
+#   (9.0 vs 4.0 ms/step on 1 thread, 3.5 vs 1.6 ms/step on 16 threads).
+#   Nuclei enter the neighbour lists of nearby cells, and the contact kernel
+#   evaluates each cell–own-nucleus pair (needed for the wrap coupling).
+# - All body types share the number of shape modes and contour nodes.
+# - Bond energies are not included in `body_energy`.
 #
 # Modelling observations (to discuss):
 #
