@@ -9,7 +9,9 @@
 #   θ̇  = -μθ ∂E/∂θ + √(2Dr) ξ
 #   ȧₙ = -μab ∂E/∂aₙ,  ḃₙ = -μab ∂E/∂bₙ
 #
-# with independent standard white noises ξ. The dynamics is active and
+# with independent standard white noises ξ. Bodies whose type has
+# drag = :parent (e.g. nuclei) feel drag relative to their parent instead and
+# are carried along with it (see displacement_kernel!). The dynamics is active and
 # athermal: Dr and Dt are free noise amplitudes, not tied to a temperature,
 # and the shape modes carry no noise. Reduced units: length R₀, energy k R₀²
 # (k = overlap coupling), time 1/(μr k).
@@ -74,34 +76,89 @@ function enforce_shape!(bodies::Bodies, basis::FourierBasis)
     return bodies
 end
 
+# Translational displacement of a body with substrate drag, including the
+# forces on its children with drag = :parent, which it bears:
+#   Δr = dt (v0 e(θ) - μr (∂E/∂r + Σ_children ∂E/∂r_child)) + √(2 Dt dt) (ξ₁, ξ₂)
+@inline function substrate_displacement(i, θ, type, gx, gy, ξ, cidx, ccount, types, dt)
+    p = types[type[i]]
+    fx = gx[i]
+    fy = gy[i]
+    for q in 1:ccount[i]
+        k = cidx[q, i]
+        if types[type[k]].parent_drag
+            fx += gx[k]
+            fy += gy[k]
+        end
+    end
+    s, c = sincos(θ[i])
+    σt = sqrt(2 * p.Dt * dt)
+    return dt * (p.v0 * c - p.μr * fx) + σt * ξ[1, i], dt * (p.v0 * s - p.μr * fy) + σt * ξ[2, i]
+end
+
+# Translational displacement of every body in one Euler–Maruyama step. One
+# work item per body i, with p = types[type[i]].
+#
+# Substrate drag (p.parent_drag false): see `substrate_displacement`.
+# Parent drag: body i with parent c feels drag ζ_i = 1/μr_i against the
+# interior of c, and c feels the reaction. The force balances
+#   ζ_c ṙ_c - Σ_children ζ_k (ṙ_k - ṙ_c) = F_c,   ζ_k (ṙ_k - ṙ_c) = F_k
+# (forces F = -∂E/∂r, plus self-propulsion v0 e(θ) as a velocity) are solved
+# explicitly by
+#   ṙ_c = v0_c e(θ_c) + μr_c (F_c + Σ_children F_k),   ṙ_k = ṙ_c + v0_k e(θ_k) + μr_k F_k,
+# so internal forces between parent and child (e.g. a bond) cancel in the
+# parent's motion. A child repeats its parent's computation (same ξ, θ, ∂E/∂r)
+# and adds its own relative displacement and noise.
+#
+#   dx, dy       (out) N, displacements
+#   θ, type      N, orientations (before the update) and body types
+#   parent       N, parent ids
+#   gx, gy       N, ∂E/∂x, ∂E/∂y
+#   ξ            3 × N standard normal random numbers (rows 1, 2 used)
+#   cidx, ccount children of each body (see ChildList)
+#   types        tuple of BodyType;  dt: time step
+@kernel function displacement_kernel!(dx, dy, @Const(θ), @Const(type), @Const(parent), @Const(gx),
+        @Const(gy), @Const(ξ), @Const(cidx), @Const(ccount), types, dt)
+    i = @index(Global)
+    p = types[type[i]]
+    if p.parent_drag
+        c = parent[i]
+        ux, uy = substrate_displacement(c, θ, type, gx, gy, ξ, cidx, ccount, types, dt)
+        s, co = sincos(θ[i])
+        σt = sqrt(2 * p.Dt * dt)
+        dx[i] = ux + dt * (p.v0 * co - p.μr * gx[i]) + σt * ξ[1, i]
+        dy[i] = uy + dt * (p.v0 * s - p.μr * gy[i]) + σt * ξ[2, i]
+    else
+        dx[i], dy[i] = substrate_displacement(i, θ, type, gx, gy, ξ, cidx, ccount, types, dt)
+    end
+end
+
 # One Euler–Maruyama step for every body. One work item per body i.
 #
 # With p = types[type[i]] the parameters of body i's type and ξ standard normal
 # numbers, the update reads
-#   r  ← r + dt (v0 (cos θ, sin θ) - μr ∂E/∂r) + √(2 Dt dt) (ξ₁, ξ₂)
+#   r  ← r + Δr   (translational displacement from displacement_kernel!)
 #   θ  ← θ - dt μθ ∂E/∂θ + √(2 Dr dt) ξ₃
 #   aₙ ← aₙ - dt μab ∂E/∂aₙ,  bₙ ← bₙ - dt μab ∂E/∂bₙ
-# using the orientation θ before the update for the propulsion (explicit
-# scheme). Afterwards the shape constraints are enforced and the position is
-# wrapped into the box, counting crossed periods in the image counters.
+# Afterwards the shape constraints are enforced and the position is wrapped
+# into the box, counting crossed periods in the image counters.
 #
-#   x, y, θ      (in/out) N, positions and orientations
+#   x, y         (in/out) N, positions
+#   θ            (in/out) N, orientations
 #   imgx, imgy   (in/out) N, periodic image counters
 #   coef         (in/out) ncoef × N body-frame coefficients
 #   type         N, body types (index into `types`)
-#   gx, gy, gθ   N, energy gradients ∂E/∂x, ∂E/∂y, ∂E/∂θ
+#   dx, dy       N, translational displacements
+#   gθ           N, energy gradient ∂E/∂θ
 #   gcoef        ncoef × N, ∂E/∂[a₀; aₙ; bₙ] (row 1 unused)
-#   ξ            3 × N standard normal random numbers
+#   ξ            3 × N standard normal random numbers (row 3 used)
 #   types        tuple of BodyType (isbits, indexed with the type)
 #   dt           time step; Lx, Ly: box size; K: number of shape modes
-@kernel function euler_maruyama_kernel!(x, y, θ, imgx, imgy, coef, @Const(type), @Const(gx),
-        @Const(gy), @Const(gθ), @Const(gcoef), @Const(ξ), types, dt, Lx, Ly, K)
+@kernel function euler_maruyama_kernel!(x, y, θ, imgx, imgy, coef, @Const(type), @Const(dx),
+        @Const(dy), @Const(gθ), @Const(gcoef), @Const(ξ), types, dt, Lx, Ly, K)
     i = @index(Global)
     p = types[type[i]]
-    s, c = sincos(θ[i])
-    σt = sqrt(2 * p.Dt * dt)
-    xn = x[i] + dt * (p.v0 * c - p.μr * gx[i]) + σt * ξ[1, i]
-    yn = y[i] + dt * (p.v0 * s - p.μr * gy[i]) + σt * ξ[2, i]
+    xn = x[i] + dx[i]
+    yn = y[i] + dy[i]
     θ[i] += -dt * p.μθ * gθ[i] + sqrt(2 * p.Dr * dt) * ξ[3, i]
     for r in 2:(2K + 1)
         coef[r, i] -= dt * p.μab * gcoef[r, i]
@@ -115,9 +172,22 @@ end
     imgy[i] += sy
 end
 
-function integrate!(bodies::Bodies, g::Gradients, ξ, types::Tuple, dt, box::PeriodicBox, basis::FourierBasis)
-    euler_maruyama_kernel!(get_backend(bodies.x), WORKGROUP)(bodies.x, bodies.y, bodies.θ,
-        bodies.imgx, bodies.imgy, bodies.coef, bodies.type, g.gx, g.gy, g.gθ, g.gcoef, ξ,
-        types, dt, box.Lx, box.Ly, nmodes(basis); ndrange = nbodies(bodies))
+"""
+    integrate!(bodies, grad, disp, ξ, children, types, dt, box, basis)
+
+One Euler–Maruyama step: translational displacements into `disp` (2 × N),
+then the update of all body variables.
+"""
+function integrate!(bodies::Bodies, g::Gradients, disp, ξ, children::ChildList, types::Tuple, dt,
+        box::PeriodicBox, basis::FourierBasis)
+    backend = get_backend(bodies.x)
+    N = nbodies(bodies)
+    dx = view(disp, 1, :)
+    dy = view(disp, 2, :)
+    displacement_kernel!(backend, WORKGROUP)(dx, dy, bodies.θ, bodies.type, bodies.parent, g.gx,
+        g.gy, ξ, children.idx, children.count, types, dt; ndrange = N)
+    euler_maruyama_kernel!(backend, WORKGROUP)(bodies.x, bodies.y, bodies.θ, bodies.imgx,
+        bodies.imgy, bodies.coef, bodies.type, dx, dy, g.gθ, g.gcoef, ξ, types, dt, box.Lx,
+        box.Ly, nmodes(basis); ndrange = N)
     return bodies
 end

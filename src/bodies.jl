@@ -1,5 +1,5 @@
 """
-    BodyType{T}(; v0 = 0, Dr = 0, Dt = 0, μr = 1, μθ = 1, μab = 0.1)
+    BodyType{T}(; v0 = 0, Dr = 0, Dt = 0, μr = 1, μθ = 1, μab = 0.1, drag = :substrate)
 
 Dynamical parameters shared by all bodies of one type (e.g. cells, nuclei):
 
@@ -9,6 +9,17 @@ Dynamical parameters shared by all bodies of one type (e.g. cells, nuclei):
 - `Dt`:  translational diffusion coefficient (noise √(2Dt) ξ on x and y; 0 in
   the original model)
 - `μr`, `μθ`, `μab`: mobilities of position, orientation and shape coefficients
+- `drag`: what the translational drag acts against. `:substrate` (default):
+  ṙ = v0 e(θ) - μr ∂E/∂r. `:parent`: drag against the parent body's
+  interior, e.g. a nucleus in the cytoplasm of its cell. The child is carried
+  along with its parent, `μr` is its mobility relative to the parent, and the
+  parent bears the child's forces (see `displacement_kernel!`):
+
+      ṙ_parent = v0 e(θ) - μr_parent (∂E/∂r_parent + Σ_children ∂E/∂r_child)
+      ṙ_child  = ṙ_parent + v0_child e(θ_child) - μr_child ∂E/∂r_child
+
+  Bodies of such a type need a parent other than themselves, whose own type
+  has `drag = :substrate`. Translational noise of the parent carries over.
 
 The model has no temperature: `Dr` and `Dt` are the only noise amplitudes and
 the shape modes are noiseless. Values are in reduced units (length R₀, energy
@@ -23,12 +34,15 @@ struct BodyType{T}
     μr::T
     μθ::T
     μab::T
+    parent_drag::Bool   # drag = :parent (a Symbol is not isbits, so kernels see a Bool)
 end
 
-BodyType{T}(; v0 = 0, Dr = 0, Dt = 0, μr = 1, μθ = 1, μab = 0.1) where {T} =
-    BodyType{T}(v0, Dr, Dt, μr, μθ, μab)
+function BodyType{T}(; v0 = 0, Dr = 0, Dt = 0, μr = 1, μθ = 1, μab = 0.1, drag::Symbol = :substrate) where {T}
+    drag in (:substrate, :parent) || throw(ArgumentError("drag must be :substrate or :parent, got :$drag"))
+    return BodyType{T}(v0, Dr, Dt, μr, μθ, μab, drag === :parent)
+end
 BodyType(; kwargs...) = BodyType{Float64}(; kwargs...)
-BodyType{T}(b::BodyType) where {T} = BodyType{T}(b.v0, b.Dr, b.Dt, b.μr, b.μθ, b.μab)
+BodyType{T}(b::BodyType) where {T} = BodyType{T}(b.v0, b.Dr, b.Dt, b.μr, b.μθ, b.μab, b.parent_drag)
 
 """
     Bodies
@@ -77,3 +91,31 @@ to_backend(backend, b::Bodies) = Bodies(map(f -> to_backend(backend, getfield(b,
 to_host(b::Bodies) = Bodies(map(f -> to_host(getfield(b, f)), fieldnames(Bodies))...)
 
 Base.show(io::IO, b::Bodies) = print(io, "Bodies(N=$(nbodies(b)), ncoef=$(size(b.coef, 1)))")
+
+"""
+    ChildList(parent; backend)
+
+Parent → children table, the inverse of `Bodies.parent`, as a padded
+`capacity × N` matrix `idx` with `count[i]` children of body i in column i
+(a body is not its own child). Built once on the host, as parents are fixed.
+"""
+struct ChildList{MI <: AbstractMatrix{Int32}, VI <: AbstractVector{Int32}}
+    idx::MI
+    count::VI
+end
+
+function ChildList(parent::AbstractVector{<:Integer}; backend = CPU())
+    N = length(parent)
+    count = zeros(Int32, N)
+    for (k, p) in enumerate(parent)
+        p == k || (count[p] += 1)
+    end
+    idx = zeros(Int32, max(1, maximum(count; init = 0)), N)
+    fill!(count, 0)
+    for (k, p) in enumerate(parent)
+        p == k && continue
+        count[p] += 1
+        idx[count[p], p] = k
+    end
+    return ChildList(to_backend(backend, idx), to_backend(backend, count))
+end

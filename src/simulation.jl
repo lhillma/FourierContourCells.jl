@@ -10,9 +10,13 @@ converted to element type `T` and moved to the KernelAbstractions `backend`.
 - `nθ`: number of contour quadrature nodes
 - `rng`: random number generator compatible with `backend`
   (default: `backend_rng(backend, seed)`)
+
+Body types with `drag = :parent` (see [`BodyType`](@ref)) require every body
+of that type to have a parent with substrate drag.
 """
 mutable struct Simulation{T, Ba <: FourierBasis{T}, Bo <: Bodies, G <: Geometry,
-        Gr <: Gradients, CL <: CellList, NL <: NeighborList, BT <: Tuple, CT <: Tuple, TT <: Tuple, R, Mat}
+        Gr <: Gradients, CL <: CellList, NL <: NeighborList, ChL <: ChildList, BT <: Tuple, CT <: Tuple,
+        TT <: Tuple, R, Mat}
     const basis::Ba
     const box::PeriodicBox{T}
     const bodies::Bo
@@ -20,11 +24,13 @@ mutable struct Simulation{T, Ba <: FourierBasis{T}, Bo <: Bodies, G <: Geometry,
     const grad::Gr
     const cells::CL
     const neighbors::NL
+    const children::ChL
     const body_terms::BT
     const contact_terms::CT
     const types::TT
     const rng::R
     const noise::Mat
+    const disp::Mat
     dt::T
     t::T
     step::Int
@@ -42,6 +48,7 @@ function Simulation(bodies::Bodies, box::PeriodicBox; types, energies = (), dt =
     host = to_host(bodies)
     maximum(host.type) <= length(types) || throw(ArgumentError("body type without BodyType entry"))
     host = Bodies(map(f -> _convert_eltype(T, getfield(host, f)), fieldnames(Bodies))...)
+    check_parents(host, types)
     dev = to_backend(backend, host)
 
     K = size(dev.coef, 1) ÷ 2
@@ -54,13 +61,28 @@ function Simulation(bodies::Bodies, box::PeriodicBox; types, energies = (), dt =
     cells = CellList(box, cutoff, nbodies(dev); backend)
     rng = rng === nothing ? backend_rng(backend, seed) : rng
     noise = KernelAbstractions.zeros(backend, T, 3, nbodies(dev))
+    disp = KernelAbstractions.zeros(backend, T, 2, nbodies(dev))
 
     neighbors = NeighborList(nbodies(dev); backend)
+    children = ChildList(host.parent; backend)
     sim = Simulation(basis, box, dev, Geometry(basis, dev), Gradients(basis, dev), cells, neighbors,
-        body_terms, contact_terms, types, rng, noise, T(dt), zero(T), 0)
+        children, body_terms, contact_terms, types, rng, noise, disp, T(dt), zero(T), 0)
     enforce_shape!(dev, basis)
     update_geometry!(sim.geom, basis, dev)
     return sim
+end
+
+"Check parent ids, and that bodies with parent drag have a parent with substrate drag."
+function check_parents(b::Bodies, types)
+    N = nbodies(b)
+    for i in 1:N
+        p = b.parent[i]
+        1 <= p <= N || throw(ArgumentError("body $i has parent $p outside 1:$N"))
+        types[b.type[i]].parent_drag || continue
+        p == i && throw(ArgumentError("body $i has drag = :parent but is its own parent"))
+        types[b.type[p]].parent_drag &&
+            throw(ArgumentError("body $i has drag = :parent, but so has its parent $p (one level only)"))
+    end
 end
 
 _convert_eltype(::Type{T}, A::AbstractArray{<:AbstractFloat}) where {T} = T.(A)
@@ -111,7 +133,8 @@ function step!(sim::Simulation, n::Integer = 1)
         isempty(sim.contact_terms) || update_neighbors!(sim)
         compute_gradients!(sim)
         randn!(sim.rng, sim.noise)
-        integrate!(sim.bodies, sim.grad, sim.noise, sim.types, sim.dt, sim.box, sim.basis)
+        integrate!(sim.bodies, sim.grad, sim.disp, sim.noise, sim.children, sim.types, sim.dt,
+            sim.box, sim.basis)
         update_geometry!(sim.geom, sim.basis, sim.bodies)
         sim.t += sim.dt
         sim.step += 1
