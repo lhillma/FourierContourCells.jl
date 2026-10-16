@@ -2,7 +2,9 @@
 #
 #   julia -t auto --project=examples examples/nucleus.jl          # live window
 #   julia -t auto --project=examples examples/nucleus.jl check    # headless run + diagnostics
+#                                        (append `substrate` for substrate drag of nuclei)
 #   julia -t auto --project=examples examples/nucleus.jl movie    # writes output/nucleus.mp4
+#   julia -t auto --project=examples examples/nucleus.jl test     # isolated-pair checks
 #
 # Extension of the Fourier contour cell model of N. Saito and S. Ishihara,
 # Sci. Adv. 10, eadi8433 (2024), doi:10.1126/sciadv.adi8433.
@@ -18,12 +20,25 @@
 #   - Anchoring: a harmonic spring E = (k/2) |r_n - r_c|² between the centres of
 #     nucleus and cell, a crude model of the cytoskeleton. The force acts on
 #     both centres (equal and opposite, minimum image).
+#   - Drag: the cell has drag ζ_c = 1/μ_c against the substrate; the nucleus
+#     has drag ζ_i = 1/μ_i against the cytoplasm, i.e. relative to its cell,
+#     with the reaction on the cell. The force balances
+#         ζ_c ṙ_c - ζ_i (ṙ_n - ṙ_c) = F_c,    ζ_i (ṙ_n - ṙ_c) = F_n
+#     give the explicit velocities
+#         ṙ_c = μ_c (F_c + F_n),    ṙ_n = ṙ_c + μ_i F_n.
+#     The cell carries its nucleus's forces with its own drag, so the spring
+#     is internal (its forces cancel in F_c + F_n) and only relaxes the
+#     nucleus towards the cell centre at rate μ_i k. An isolated cell moves at
+#     v0 with zero lag. Without relative drag (`drag = nothing`) both bodies
+#     have substrate drag, which slows an isolated cell to
+#     v0 μ_n / (μ_c + μ_n).
 #   - Nucleus stiffness: a stronger line tension on type 2 than on type 1.
 #
-# The spring is not expressible with the current energy API (BodyTerms depend
-# on the shape only, ContactTerms on the penetration depth only), so this
-# script adds its gradient between `compute_gradients!` and the integrator in
-# a custom time step. See the notes at the end of the file.
+# Neither the spring nor the relative drag fits the current energy API
+# (BodyTerms depend on the shape only, ContactTerms on the penetration depth
+# only), so this script modifies the centre gradients between
+# `compute_gradients!` and the integrator in a custom time step. See the notes
+# at the end of the file.
 
 using FourierContourCells
 using GLMakie
@@ -88,13 +103,100 @@ function add_spring!(sim, s::CentreSpring, anchor)
     return sim
 end
 
-# Time step: a copy of `FourierContourCells.step!` with the spring inserted
-# after the energy gradients. Uses internal (non-public) functions.
-function nucleus_step!(sim, s::CentreSpring, anchor, n::Integer = 1)
+"""
+    RelativeDrag(μi)
+
+Drag of a nucleus relative to its cell, with mobility `μi` (see the header).
+"""
+struct RelativeDrag{T}
+    μi::T
+end
+
+# Rewrite the centre gradients so that the integrator, which moves body i by
+# dt (v0 e(θᵢ) - μr gᵢ), produces the relative-drag velocities. One work item
+# per body i; g = ∂E/∂r = -F (spring included).
+#
+#   cell c with nucleus n:  g_c ← g_c + g_n, so that
+#       v_c = v0_c e(θ_c) - μ_c (g_c + g_n)
+#   nucleus n of cell c:    target v_n = v_c - μ_i g_n; the integrator gives
+#       v0_n e(θ_n) - μr_n g, so  g ← (v0_n e(θ_n) - v_n) / μr_n
+#   other bodies:           unchanged
+#
+# The work items read gradients of their partner, so the results go to
+# separate buffers (hx, hy) and are copied back afterwards. θ is read before
+# the integrator updates it. Translational noise (Dt) of the cell is not
+# passed on to the nucleus.
+#
+#   hx, hy      (out) N, rewritten ∂E/∂x, ∂E/∂y
+#   gx, gy      N, ∂E/∂x, ∂E/∂y from the energy terms and the spring
+#   θ, type     N, orientations and body types
+#   anchor      N, partner of each body (cell ↔ nucleus; 0: none)
+#   types       tuple of BodyType;  nucleus: type index of nuclei
+#   μi          mobility of a nucleus relative to its cell
+@kernel function relative_drag_kernel!(hx, hy, @Const(gx), @Const(gy), @Const(θ), @Const(type),
+        @Const(anchor), types, nucleus, μi)
+    i = @index(Global)
+    j = anchor[i]
+    if j == 0
+        hx[i] = gx[i]
+        hy[i] = gy[i]
+    elseif type[i] != nucleus
+        hx[i] = gx[i] + gx[j]
+        hy[i] = gy[i] + gy[j]
+    else
+        pc = types[type[j]]
+        pn = types[type[i]]
+        sc, cc = sincos(θ[j])
+        vx = pc.v0 * cc - pc.μr * (gx[j] + gx[i]) - μi * gx[i]
+        vy = pc.v0 * sc - pc.μr * (gy[j] + gy[i]) - μi * gy[i]
+        sn, cn = sincos(θ[i])
+        hx[i] = (pn.v0 * cn - vx) / pn.μr
+        hy[i] = (pn.v0 * sn - vy) / pn.μr
+    end
+end
+
+"Work buffers for `relative_drag!`."
+drag_buffers(sim) = (similar(sim.bodies.x), similar(sim.bodies.x))
+
+function relative_drag!(sim, d::RelativeDrag, anchor, (hx, hy))
+    b, g = sim.bodies, sim.grad
+    T = eltype(b.x)
+    relative_drag_kernel!(get_backend(b.x), 256)(hx, hy, g.gx, g.gy, b.θ, b.type, anchor,
+        sim.types, Int32(NUCLEUS), T(d.μi); ndrange = nbodies(b))
+    copyto!(g.gx, hx)
+    copyto!(g.gy, hy)
+    return sim
+end
+
+"""
+    NucleusModel(spring, drag, anchor, buffers)
+
+Everything the custom time step adds to `sim`: the centre spring, the
+relative drag (`nothing`: substrate drag for nuclei too), the partner table
+(on the backend) and work buffers. Build with [`nucleus_model`](@ref).
+"""
+struct NucleusModel{S, D, A, B}
+    spring::S
+    drag::D
+    anchor::A
+    buffers::B
+end
+
+"Set up a `NucleusModel` for `sim` from the host partner table of `with_nuclei`."
+function nucleus_model(sim, spring, drag, anchor_host)
+    anchor = FCC.to_backend(get_backend(sim.bodies.x), anchor_host)
+    return NucleusModel(spring, drag, anchor, drag_buffers(sim))
+end
+
+# Time step: a copy of `FourierContourCells.step!` with the spring and the
+# relative drag inserted after the energy gradients. Uses internal
+# (non-public) functions.
+function nucleus_step!(sim, m::NucleusModel, n::Integer = 1)
     for _ in 1:n
-        FCC.update_neighbors!(sim)
+        isempty(sim.contact_terms) || FCC.update_neighbors!(sim)
         compute_gradients!(sim)
-        add_spring!(sim, s, anchor)
+        add_spring!(sim, m.spring, m.anchor)
+        m.drag === nothing || relative_drag!(sim, m.drag, m.anchor, m.buffers)
         randn!(sim.rng, sim.noise)
         FCC.integrate!(sim.bodies, sim.grad, sim.noise, sim.types, sim.dt, sim.box, sim.basis)
         FCC.update_geometry!(sim.geom, sim.basis, sim.bodies)
@@ -162,61 +264,136 @@ function nucleus_plot(sim)
 end
 
 # `live_view` and `record_movie` call `step!`, which knows nothing about the
-# spring, so the loops are rewritten here.
-function nucleus_live(sim, s, anchor; steps_per_frame = 50)
+# spring and the drag, so the loops are rewritten here.
+function nucleus_live(sim, m; steps_per_frame = 50)
     fig, view = nucleus_plot(sim)
     screen = display(fig)
     while isopen(screen)
-        nucleus_step!(sim, s, anchor, steps_per_frame)
+        nucleus_step!(sim, m, steps_per_frame)
         update_view!(view)
         sleep(1 / 120)
     end
 end
 
-function nucleus_movie(sim, s, anchor, path; frames = 600, steps_per_frame = 100)
+function nucleus_movie(sim, m, path; frames = 600, steps_per_frame = 100)
     fig, view = nucleus_plot(sim)
     record(fig, path, 1:frames; framerate = 30) do _
-        nucleus_step!(sim, s, anchor, steps_per_frame)
+        nucleus_step!(sim, m, steps_per_frame)
         update_view!(view)
     end
     return path
 end
 
 # ---------------------------------------------------------------------------
-# Setup: "soft fluid" cell parameters of Saito & Ishihara (2024), Fig. 2C
-
-cells, box = hexagonal_monolayer(32, 32; packing = 0.95)
-bodies, anchor_host = with_nuclei(cells; ratio = 0.5)
+# Parameters: "soft fluid" cells of Saito & Ishihara (2024), Fig. 2C
 
 # overlap couplings indexed (type_i, type_j); same-parent pairs use `related`
-J = [1.0 1.0; 1.0 1.0]
-Jrelated = [0.0 0.0; 0.0 0.0]
+const J = [1.0 1.0; 1.0 1.0]
+const JRELATED = [0.0 0.0; 0.0 0.0]
+const ENERGIES = (OnTypes(Tension(0.01), CELL), OnTypes(Tension(0.05), NUCLEUS),
+    Overlap(J; related = JRELATED))
+cell_type(; v0 = 0.06, Dr = 0.01) = BodyType(; v0, Dr, μab = 0.1)
+nucleus_type(; Dr = 0.01) = BodyType(; v0 = 0.0, Dr, μab = 0.1)
+const SPRING = CentreSpring(1.0)
+const DRAG = RelativeDrag(1.0)
 
-sim = Simulation(bodies, box;
-    types = (BodyType(v0 = 0.06, Dr = 0.01, μab = 0.1),    # cell
-             BodyType(v0 = 0.0, Dr = 0.01, μab = 0.1)),    # nucleus
-    energies = (OnTypes(Tension(0.01), CELL), OnTypes(Tension(0.05), NUCLEUS),
-                Overlap(J; related = Jrelated)),
-    dt = 0.005)
-spring = CentreSpring(1.0)
-anchor = FCC.to_backend(get_backend(sim.bodies.x), anchor_host)
+# ---------------------------------------------------------------------------
+# Checks on an isolated cell–nucleus pair (no noise, no contacts)
+
+"Cell at the box centre, nucleus displaced by `δ0` along x; orientation θ = 0."
+function isolated_pair(; v0, drag, δ0 = 0.0, L = 20.0)
+    cells = Bodies([L / 2], [L / 2], [0.0], [1.0; zeros(10)][:, :], [1.0])
+    bodies, anchor = with_nuclei(cells)
+    bodies.x[2] += δ0
+    bodies.θ[2] = 0.0
+    sim = Simulation(bodies, PeriodicBox(L, L); types = (cell_type(; v0, Dr = 0.0),
+        nucleus_type(; Dr = 0.0)), energies = ENERGIES, dt = 0.005)
+    return sim, nucleus_model(sim, SPRING, drag, anchor)
+end
+
+"Run `t` time units; return cell speed (last half) and final lag x_c - x_n."
+function drift(sim, m, t)
+    nhalf = round(Int, t / 2 / sim.dt)
+    nucleus_step!(sim, m, nhalf)
+    x0 = unwrapped_positions(sim)[1, 1]
+    nucleus_step!(sim, m, nhalf)
+    X = unwrapped_positions(sim)
+    return (X[1, 1] - x0) / (nhalf * sim.dt), X[1, 1] - X[1, 2]
+end
+
+function check(name, value, expected; atol)
+    ok = isapprox(value, expected; atol)
+    println(ok ? "  pass  " : "  FAIL  ", rpad(name, 44), "got ", value, ", expected ", expected)
+    return ok
+end
+
+function run_tests()
+    v0, k, μi = 0.06, SPRING.k, DRAG.μi
+    ok = true
+    println("isolated pair, relative drag: the composite moves at v0, no lag")
+    sim, m = isolated_pair(; v0, drag = DRAG)
+    V, δ = drift(sim, m, 50.0)
+    ok &= check("speed", V, v0; atol = 1e-12)
+    ok &= check("lag", δ, 0.0; atol = 1e-12)
+
+    println("isolated pair, substrate drag: V = v0/2, lag v0/(2k)")
+    sim, m = isolated_pair(; v0, drag = nothing)
+    V, δ = drift(sim, m, 50.0)
+    ok &= check("speed", V, v0 / 2; atol = 1e-9)
+    ok &= check("lag", δ, v0 / (2k); atol = 1e-9)
+
+    println("relaxation, relative drag: the spring is internal, the cell stays put")
+    δ0, n = 0.1, 400
+    sim, m = isolated_pair(; v0 = 0.0, drag = DRAG, δ0)
+    xc = sim.bodies.x[1]
+    nucleus_step!(sim, m, n)
+    ok &= check("cell displacement", sim.bodies.x[1] - xc, 0.0; atol = 1e-14)
+    # explicit Euler of δ̇ = -μi k δ
+    ok &= check("nucleus offset", sim.bodies.x[2] - sim.bodies.x[1], δ0 * (1 - μi * k * sim.dt)^n;
+        atol = 1e-14)
+    ok || error("nucleus checks failed")
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
+# Monolayer
+
+function monolayer(; drag = DRAG)
+    cells, box = hexagonal_monolayer(32, 32; packing = 0.95)
+    bodies, anchor = with_nuclei(cells; ratio = 0.5)
+    sim = Simulation(bodies, box; types = (cell_type(), nucleus_type()), energies = ENERGIES,
+        dt = 0.005)
+    return sim, nucleus_model(sim, SPRING, drag, anchor)
+end
+
+"Mean cell displacement |Δr| over the whole run, for comparing drag models."
+mean_cell_displacement(sim, X0) =
+    mean(vec(sqrt.(sum(abs2, (unwrapped_positions(sim) .- X0)[:, Array(sim.bodies.type) .== CELL]; dims = 1))))
 
 mode = get(ARGS, 1, "live")
-if mode == "check"
+if mode == "test"
+    run_tests()
+elseif mode == "check"
+    drag = get(ARGS, 2, "relative") == "substrate" ? nothing : DRAG
+    sim, m = monolayer(; drag)
+    X0 = unwrapped_positions(sim)
     for _ in 1:10
-        nucleus_step!(sim, spring, anchor, 2_000)
+        nucleus_step!(sim, m, 2_000)
         report(sim)
     end
+    println("mean cell displacement: ", round(mean_cell_displacement(sim, X0); digits = 3))
     mkpath(joinpath(@__DIR__, "..", "output"))
     path = joinpath(@__DIR__, "..", "output", "nucleus.png")
     save(path, first(nucleus_plot(sim)))
     println("wrote ", path)
 elseif mode == "movie"
-    nucleus_step!(sim, spring, anchor, 20_000)
+    sim, m = monolayer()
+    nucleus_step!(sim, m, 20_000)
     mkpath(joinpath(@__DIR__, "..", "output"))
-    println("wrote ", nucleus_movie(sim, spring, anchor, joinpath(@__DIR__, "..", "output", "nucleus.mp4")))
+    println("wrote ", nucleus_movie(sim, m, joinpath(@__DIR__, "..", "output", "nucleus.mp4")))
 elseif mode == "live"
-    nucleus_live(sim, spring, anchor)
+    sim, m = monolayer()
+    nucleus_live(sim, m)
 end
 
 # ---------------------------------------------------------------------------
@@ -230,6 +407,11 @@ end
 #    functions (`update_neighbors!`, `integrate!`, `update_geometry!`), which
 #    silently diverges if `step!` changes. Candidates: a third term kind
 #    (e.g. `BondTerm` with a bond list, E(rᵢ - rⱼ)), or a force hook in `step!`.
+#    The relative drag is not an energy at all but a change of the mobility
+#    (velocities from forces), so it needs the same hook, or a per-type
+#    option "drag relative to parent" in the integrator. Emulating it by
+#    rewriting gradients works (the integrator is r += dt (v0 e - μr g)) but
+#    needs scratch buffers and couples the script to the integrator's form.
 # 2. `live_view` / `record_movie` hard-code `step!`, so both loops are
 #    rewritten here. This would be solved by 1, or by a `step` keyword.
 # 3. No parent → child lookup: `Bodies.parent` maps nucleus → cell only; the
@@ -255,12 +437,20 @@ end
 #
 # - With `related` = 0 the cell membrane does not feel its own nucleus. An
 #   elongating cell can therefore narrow past it: after t = 100, one nucleus
-#   pokes out of its cell (by 0.007 R₀). Confinement would need an energy for
-#   the area of a nucleus *outside* its own cell (d < 0 for the related pair),
-#   i.e. an interaction range of about a nucleus diameter.
-# - The nucleus adds friction: an isolated cell with nucleus (both μr = 1)
-#   moves at v0/2 with a lag |r_n - r_c| = v0 / (2 μr k) = 0.03 R₀. In the
-#   dense monolayer the mean offset is ≈ 0.01 R₀.
+#   pokes out of its cell. With relative drag the cells deform more (see
+#   below) and 7 nuclei protrude at t = 100 (by up to 0.027 R₀). Confinement
+#   would need an energy for the area of a nucleus *outside* its own cell
+#   (d < 0 for the related pair), i.e. an interaction range of about a
+#   nucleus diameter.
+# - Drag (t = 100, same seed; mean cell displacement, ⟨p⟩ of cells):
+#     cells only, no nuclei            0.926   3.821
+#     nuclei with relative drag        0.930   3.825   mean offset < 0.001 R₀
+#     nuclei with substrate drag       0.594   3.766   mean offset ≈ 0.013 R₀
+#   Substrate drag on the nucleus double-counts the friction of the cell's
+#   footprint: an isolated pair (both μr = 1) moves at v0/2 with a lag of
+#   v0 / (2 μr k) = 0.03 R₀, independent of k. With relative drag the
+#   composite moves at v0 without lag, and the monolayer matches the
+#   cells-only model, since the nuclei are rarely touched by other bodies.
 # - The spring acts on the polar origins r, which differ from the area
 #   centroids once modes n ≥ 2 are excited (products of modes create n = 1
 #   harmonics in ∮ R³ e_φ dφ).
