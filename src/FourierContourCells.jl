@@ -43,6 +43,7 @@ include("energies/body_terms.jl")
 include("gradients.jl")
 include("neighbors.jl")
 include("energies/contact.jl")
+include("energies/bonds.jl")
 include("dynamics.jl")
 include("simulation.jl")
 include("initial.jl")
@@ -53,13 +54,13 @@ include("visualization.jl")
 export FourierBasis, PeriodicBox, Bodies, BodyType, nbodies, ncoef, nmodes
 # energy interface: types are exported; the methods users extend are public but
 # not exported (generic names), e.g. `FourierContourCells.energy(t::MyTerm, Q, b) = ...`
-export EnergyTerm, BodyTerm, ContactTerm, BodyInfo, OnTypes, ForwardDiffAD, EnzymeAD
+export EnergyTerm, BodyTerm, ContactTerm, BondTerm, BodyInfo, OnTypes, ForwardDiffAD, EnzymeAD
 public contour_integrands, energy, contour_integrand_gradients, energy_gradient, pressure,
-    interaction_range, applies_to, ad_backend
+    interaction_range, applies_to, ad_backend, bond_energy, bond_gradient
 # built-in energy terms
-export Tension, PerimeterElasticity, Overlap, LinearRepulsion
+export Tension, PerimeterElasticity, Overlap, LinearRepulsion, HarmonicBond
 # simulation
-export Simulation, step!, run!, compute_gradients!, hexagonal_monolayer, CPU
+export Simulation, step!, run!, compute_gradients!, hexagonal_monolayer, parent_bonds, CPU
 # observables
 export perimeters, areas, shape_index, positions, unwrapped_positions, contours, body_energy
 # visualisation (Makie extension)

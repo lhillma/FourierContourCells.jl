@@ -1,4 +1,18 @@
-using FourierContourCells: ChildList, integrate!
+using FourierContourCells: ChildList, BondList, integrate!, bond_energy, bond_gradient
+using StaticArrays: SVector
+
+# Bond term with AD gradient only: E = c |Δ|⁴ (+ type-dependent offset)
+struct QuarticBond{T} <: BondTerm
+    c::T
+end
+FourierContourCells.bond_energy(b::QuarticBond, Δ, ti, tj) = b.c * (Δ[1]^2 + Δ[2]^2)^2 + ti + tj
+
+"Central finite-difference gradient of a bond energy."
+function fd_bond_gradient(term, Δ, ti, tj; h = 1e-6)
+    e(d) = bond_energy(term, d, ti, tj)
+    return SVector((e(Δ + SVector(h, 0)) - e(Δ - SVector(h, 0))) / 2h,
+        (e(Δ + SVector(0, h)) - e(Δ - SVector(0, h))) / 2h)
+end
 
 "Cell (type 1) with nucleus (type 2, drag = :parent) at (5, 5), plus a free cell."
 function cell_nucleus_sim(; nucleus = BodyType(drag = :parent), cell = BodyType(), dt = 0.01)
@@ -64,5 +78,63 @@ end
         X = unwrapped_positions(sim)
         @test X[:, 1] ≈ [5.0, 5.0] .+ 10 .* [cos(0.3), sin(0.3)]
         @test X[:, 2] ≈ X[:, 1]
+    end
+
+    @testset "bond gradients" begin
+        Δ = SVector(0.3, -0.7)
+        for term in (HarmonicBond(1.3), HarmonicBond(1.3; r0 = 0.4), QuarticBond(0.8))
+            @test bond_gradient(term, Δ, 1, 2) ≈ fd_bond_gradient(term, Δ, 1, 2) rtol = 1e-7
+        end
+        @test bond_gradient(HarmonicBond(2.0), SVector(0.0, 0.0), 1, 1) == SVector(0.0, 0.0)
+        @test bond_gradient(HarmonicBond(2.0; r0 = 0.5), SVector(0.0, 0.0), 1, 1) == SVector(0.0, 0.0)
+        @test bond_energy(HarmonicBond(2.0; r0 = 0.5), SVector(0.3, 0.4), 1, 1) ≈ 0.0
+    end
+
+    @testset "bond lists" begin
+        bl = BondList([(1, 2), (3, 1)], 3)
+        @test Array(bl.count) == [2, 1, 1]
+        @test sort(Array(bl.idx)[1:2, 1]) == [2, 3]
+        @test FourierContourCells.nbonds(bl) == 2
+        @test_throws ArgumentError BondList([(1, 1)], 3)
+        @test_throws ArgumentError BondList([(1, 2), (2, 1)], 3)
+        @test_throws ArgumentError BondList([(1, 4)], 3)
+        coef = [1.0; zeros(10)] .* ones(1, 3)
+        b = Bodies(zeros(3), zeros(3), zeros(3), coef, ones(3); parent = [1, 1, 2])
+        @test parent_bonds(b) == [(2, 1), (3, 2)]
+    end
+
+    @testset "bond forces" begin
+        # bonded pair across the periodic boundary; the third body is unbonded
+        coef = [1.0; zeros(10)] .* ones(1, 3)
+        bodies = Bodies([9.8, 0.4, 5.0], [3.0, 3.5, 5.0], zeros(3), coef, ones(3); type = [1, 2, 1])
+        box = PeriodicBox(10.0, 10.0)
+        Δ = [9.8 - 0.4 - 10, 3.0 - 3.5]                # minimum image r₁ - r₂
+        for (terms, k) in (((HarmonicBond(0.7),), 0.7),
+                (((OnTypes(HarmonicBond(0.7), 1, 2)),), 0.7),
+                ((OnTypes(HarmonicBond(0.7), 1),), 0.0),     # type 2 excluded
+                ((HarmonicBond(0.7), HarmonicBond(0.3)), 1.0))
+            sim = Simulation(bodies, box; types = (BodyType(), BodyType()), energies = terms,
+                bonds = [(1, 2)])
+            compute_gradients!(sim)
+            g = Array(sim.grad.gx), Array(sim.grad.gy)
+            @test [g[1][1], g[2][1]] ≈ k .* Δ atol = 1e-14
+            @test [g[1][2], g[2][2]] ≈ -k .* Δ atol = 1e-14
+            @test [g[1][3], g[2][3]] == [0.0, 0.0]
+        end
+        @test_throws ArgumentError Simulation(bodies, box; types = (BodyType(), BodyType()),
+            energies = (HarmonicBond(1.0), :notaterm))
+    end
+
+    @testset "bonded nucleus relaxes inside its cell" begin
+        # parent drag: the bond is internal, so the cell stays put and the
+        # offset follows explicit Euler of δ̇ = -μr k δ
+        μ, k, δ0, n = 2.0, 0.5, 0.2, 300
+        sim = cell_nucleus_sim(; nucleus = BodyType(μr = μ, drag = :parent))
+        sim.bodies.x[2] += δ0
+        sim = Simulation(sim.bodies, sim.box; types = sim.types, energies = (HarmonicBond(k),),
+            bonds = parent_bonds(sim.bodies), dt = sim.dt)
+        step!(sim, n)
+        @test sim.bodies.x[1] == 5.0 && sim.bodies.y[1] == 5.0
+        @test sim.bodies.x[2] - 5.0 ≈ δ0 * (1 - μ * k * sim.dt)^n rtol = 1e-12
     end
 end
