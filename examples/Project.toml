@@ -2,6 +2,7 @@
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 FourierContourCells = "199c25b0-0c5e-4658-8424-08d56a2832c7"
 GLMakie = "e9467ef8-e4e7-5192-8a1a-b1aee30e663a"
+KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
 LanguageServer = "2b0e0bc5-e4fd-59b4-8912-456d1b03d8d7"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 
