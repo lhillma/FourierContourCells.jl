@@ -34,6 +34,7 @@ The repository is a Julia workspace: the package lives at the root, `test/` and
 julia --project=examples -e 'using Pkg; Pkg.instantiate()'
 julia -t auto --project=examples examples/live.jl      # interactive window
 julia -t auto --project=examples examples/movie.jl     # writes output/soft_fluid.mp4
+julia -t auto --project=examples examples/nucleus.jl   # cells with nuclei (live window)
 julia -t auto --project=test test/runtests.jl          # test suite
 ```
 
@@ -139,10 +140,43 @@ Built-in terms: `Tension(η)` (paper), `PerimeterElasticity(λ, p0)`,
 per type pair and for bodies with the same parent), `LinearRepulsion(k)`.
 `OnTypes(term, types...)` restricts any term to body types.
 
+**Bond terms** (`BondTerm`) are pair energies E(**r**ᵢ − **r**ⱼ) between the
+centres of explicitly listed bodies, `Simulation(...; bonds = [(i, j), …])`.
+Define `bond_energy(term, Δ, tᵢ, tⱼ)` (symmetric under Δ → −Δ with swapped
+types); the gradient comes from AD unless `bond_gradient` is given.
+Built-in: `HarmonicBond(k; r0)`.
+
 **Nuclei.** Bodies carry a `type` and a `parent`. A nucleus is a body whose
-parent is its cell; a negative `related` coupling in `Overlap` rewards overlap
-with the own cell (equivalently: penalises nucleus area outside it) while
-positive couplings repel all other cells and nuclei.
+parent is its cell (`with_nuclei(cells; ratio)` adds one per cell):
+
+```julia
+bodies = with_nuclei(cells; ratio = 0.5)          # types 1 (cells) and 2 (nuclei)
+sim = Simulation(bodies, box;
+    types = (BodyType(v0 = 0.06, Dr = 0.01),               # cell
+             BodyType(v0 = 0.0, Dr = 0.01, drag = :parent)),  # nucleus
+    energies = (OnTypes(Tension(0.01), 1), OnTypes(Tension(0.05), 2),
+                Overlap([1.0 1.0; 1.0 1.0]; related = [0 -2.0; -2.0 0]),
+                HarmonicBond(0.2)),
+    bonds = parent_bonds(bodies))
+FourierContourCells.live_view(sim; layers = ((types = 1, color = :shape_index),
+                                             (types = 2, color = :steelblue)))
+```
+
+- `drag = :parent`: the nucleus feels drag against its cell's interior
+  instead of the substrate. The cell bears the nucleus's forces and carries
+  it along, so an isolated cell keeps its speed v0, and parent–child bonds
+  are internal forces.
+- A negative `related` coupling makes cell and own nucleus gain energy from
+  overlapping. The membrane wraps the nucleus and pulls back parts that poke
+  out; a nucleus fully inside its cell feels no force from it.
+- `HarmonicBond` on `parent_bonds` anchors each nucleus to its cell centre
+  (a crude cytoskeleton).
+- Diagnostics: `protrusion(sim)` and the `type =` filter of `shape_index`,
+  `areas`, `perimeters`.
+
+`examples/nucleus.jl` documents the modelling choices and checks them.
+For quick experiments, `Simulation(...; hook! = f)` calls `f(sim)` after the
+gradients in every step. It is meant for prototyping only.
 
 ## Validation
 
@@ -172,12 +206,12 @@ N = 1024 at packing 0.95, Float64: 4.7 ms/step on one thread (reference C++
 ```
 src/
   basis.jl          synthesis matrices, coefficient layout [a₀; aₙ; bₙ]
-  bodies.jl         body state (structure of arrays) and BodyType
+  bodies.jl         body state (structure of arrays), BodyType, parent → children table
   geometry.jl       lab-frame rotation, contour synthesis, R(ψ) off-grid
-  energies/         interface (+ AD), body terms, contact terms & kernel
+  energies/         interface (+ AD), body, contact and bond terms & kernels
   gradients.jl      contour gradients → (r, θ, aₙ, bₙ)
   neighbors.jl      cell list and per-body neighbour list
-  dynamics.jl       Euler–Maruyama integrator, shape constraints
+  dynamics.jl       displacements (substrate / parent drag), Euler–Maruyama, shape constraints
   simulation.jl     Simulation, step!, run!
 ext/                Makie (visualisation) and Enzyme extensions
 ```
