@@ -137,4 +137,23 @@ end
         @test sim.bodies.x[1] == 5.0 && sim.bodies.y[1] == 5.0
         @test sim.bodies.x[2] - 5.0 ≈ δ0 * (1 - μ * k * sim.dt)^n rtol = 1e-12
     end
+
+    @testset "prototyping hook" begin
+        # constant extra force (1, -2) on body 3 via the hook
+        calls = Ref(0)
+        function extra_force!(sim)
+            calls[] += 1
+            sim.grad.gx[3] -= 1.0
+            sim.grad.gy[3] += 2.0
+        end
+        coef = [1.0; zeros(10)] .* ones(1, 3)
+        b = Bodies([5.0, 5.0, 1.0], [5.0, 5.0, 1.0], zeros(3), coef, ones(3); parent = [1, 1, 3],
+            type = [1, 2, 1])
+        sim = Simulation(b, PeriodicBox(10.0, 10.0); types = (BodyType(μr = 0.5), BodyType(drag = :parent)),
+            dt = 0.01, hook! = extra_force!)
+        step!(sim, 10)
+        @test calls[] == 10
+        @test unwrapped_positions(sim)[:, 3] ≈ [1.0, 1.0] .+ 0.5 * 0.1 .* [1.0, -2.0]
+        @test unwrapped_positions(sim)[:, 1] ≈ [5.0, 5.0]
+    end
 end

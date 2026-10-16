@@ -1,6 +1,6 @@
 """
     Simulation(bodies, box; types, energies, bonds = (), dt = 0.005, nθ = 40,
-               backend = CPU(), T = Float64, seed = 1, rng = nothing)
+               backend = CPU(), T = Float64, seed = 1, rng = nothing, hook! = nothing)
 
 Complete simulation state. `bodies` (host or device [`Bodies`](@ref)) are
 converted to element type `T` and moved to the KernelAbstractions `backend`.
@@ -14,12 +14,19 @@ converted to element type `T` and moved to the KernelAbstractions `backend`.
 - `rng`: random number generator compatible with `backend`
   (default: `backend_rng(backend, seed)`)
 
+- `hook!`: optional function `hook!(sim)` called in every [`step!`](@ref)
+  after the energy gradients `sim.grad` are computed and before the
+  integration step. It may modify the gradients, e.g. to add forces that no
+  energy term expresses yet. **Meant for prototyping only**: it relies on
+  internal fields, which may change, and is not part of the GPU-ready API.
+  Once a prototype works, move it into a proper term.
+
 Body types with `drag = :parent` (see [`BodyType`](@ref)) require every body
 of that type to have a parent with substrate drag.
 """
 mutable struct Simulation{T, Ba <: FourierBasis{T}, Bo <: Bodies, G <: Geometry,
         Gr <: Gradients, CL <: CellList, NL <: NeighborList, ChL <: ChildList, BL <: BondList, BT <: Tuple,
-        CT <: Tuple, BoT <: Tuple, TT <: Tuple, R, Mat}
+        CT <: Tuple, BoT <: Tuple, TT <: Tuple, R, Mat, H}
     const basis::Ba
     const box::PeriodicBox{T}
     const bodies::Bo
@@ -36,13 +43,15 @@ mutable struct Simulation{T, Ba <: FourierBasis{T}, Bo <: Bodies, G <: Geometry,
     const rng::R
     const noise::Mat
     const disp::Mat
+    const hook::H
     dt::T
     t::T
     step::Int
 end
 
 function Simulation(bodies::Bodies, box::PeriodicBox; types, energies = (), bonds = (), dt = 0.005,
-        nθ::Integer = 40, backend = CPU(), T::Type = Float64, seed = 1, rng = nothing)
+        nθ::Integer = 40, backend = CPU(), T::Type = Float64, seed = 1, rng = nothing,
+        hook! = nothing)
     types = map(BodyType{T}, Tuple(types))
     energies = Tuple(energies)
     body_terms = filter(is_body_term, energies)
@@ -73,8 +82,8 @@ function Simulation(bodies::Bodies, box::PeriodicBox; types, energies = (), bond
     children = ChildList(host.parent; backend)
     bondlist = BondList(bonds, nbodies(host); backend)
     sim = Simulation(basis, box, dev, Geometry(basis, dev), Gradients(basis, dev), cells, neighbors,
-        children, bondlist, body_terms, contact_terms, bond_terms, types, rng, noise, disp, T(dt),
-        zero(T), 0)
+        children, bondlist, body_terms, contact_terms, bond_terms, types, rng, noise, disp, hook!,
+        T(dt), zero(T), 0)
     enforce_shape!(dev, basis)
     update_geometry!(sim.geom, basis, dev)
     return sim
@@ -141,6 +150,7 @@ function step!(sim::Simulation, n::Integer = 1)
     for _ in 1:n
         isempty(sim.contact_terms) || update_neighbors!(sim)
         compute_gradients!(sim)
+        sim.hook === nothing || sim.hook(sim)
         randn!(sim.rng, sim.noise)
         integrate!(sim.bodies, sim.grad, sim.disp, sim.noise, sim.children, sim.types, sim.dt,
             sim.box, sim.basis)
