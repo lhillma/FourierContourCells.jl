@@ -156,4 +156,42 @@ end
         @test unwrapped_positions(sim)[:, 3] ≈ [1.0, 1.0] .+ 0.5 * 0.1 .* [1.0, -2.0]
         @test unwrapped_positions(sim)[:, 1] ≈ [5.0, 5.0]
     end
+
+    @testset "vcat and with_nuclei" begin
+        coef = [1.0; zeros(10)] .* ones(1, 2)
+        a = Bodies([1.0, 2.0], [1.0, 2.0], zeros(2), coef, ones(2); parent = [1, 1])
+        b = Bodies([3.0, 4.0], [3.0, 4.0], zeros(2), coef, ones(2); type = 2, parent = [2, 2])
+        c = vcat(a, b)
+        @test nbodies(c) == 4
+        @test c.parent == [1, 1, 4, 4]
+        @test c.type == [1, 1, 2, 2]
+        @test c.x == [1.0, 2.0, 3.0, 4.0]
+
+        cells, box = hexagonal_monolayer(4, 4)
+        bodies = with_nuclei(cells; ratio = 0.4)
+        N = nbodies(cells)
+        @test nbodies(bodies) == 2N
+        @test bodies.parent == [1:N; 1:N]
+        @test bodies.type == [fill(1, N); fill(2, N)]
+        @test bodies.R0[(N + 1):end] ≈ 0.4 .* cells.R0
+        @test bodies.x[(N + 1):end] == cells.x
+        @test parent_bonds(bodies) == [(N + i, i) for i in 1:N]
+    end
+
+    @testset "observables by type and protrusion" begin
+        cells, box = hexagonal_monolayer(4, 4)
+        bodies = with_nuclei(cells; ratio = 0.5)
+        N = nbodies(cells)
+        bodies.x[N + 1] += 0.7           # nucleus 1 pokes 0.2 out of its (round) cell
+        bodies.x[N + 2] += 0.2           # nucleus 2 lies 0.3 inside
+        sim = Simulation(bodies, box; types = (BodyType(), BodyType(drag = :parent)), nθ = 64)
+        @test areas(sim; type = 2) ≈ fill(π / 4, N)
+        @test areas(sim; type = 1) ≈ fill(π, N)
+        @test length(shape_index(sim; type = 2)) == N
+        p = protrusion(sim)
+        @test all(isnan, p[1:N])
+        @test p[N + 1] ≈ 0.2 atol = 1e-12
+        @test p[N + 2] ≈ -0.3 atol = 1e-12
+        @test protrusion(sim; type = 2) == p[(N + 1):end]
+    end
 end

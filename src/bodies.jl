@@ -87,6 +87,20 @@ end
 
 nbodies(b::Bodies) = length(b.x)
 
+"""
+    vcat(bodies::Bodies...)
+
+Concatenate host body sets. Parent ids are shifted with their set, so each
+body keeps its parent; all sets need the same number of Fourier coefficients.
+"""
+function Base.vcat(bs::Bodies...)
+    offsets = cumsum([0; [nbodies(b) for b in bs[1:(end - 1)]]])
+    cat(f) = reduce(vcat, [getfield(b, f) for b in bs])
+    parent = reduce(vcat, [b.parent .+ Int32(o) for (b, o) in zip(bs, offsets)])
+    return Bodies(cat(:x), cat(:y), cat(:θ), cat(:imgx), cat(:imgy), reduce(hcat, [b.coef for b in bs]),
+        cat(:R0), cat(:type), parent)
+end
+
 to_backend(backend, b::Bodies) = Bodies(map(f -> to_backend(backend, getfield(b, f)), fieldnames(Bodies))...)
 to_host(b::Bodies) = Bodies(map(f -> to_host(getfield(b, f)), fieldnames(Bodies))...)
 
