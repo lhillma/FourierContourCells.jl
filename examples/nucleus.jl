@@ -2,7 +2,8 @@
 #
 #   julia -t auto --project=examples examples/nucleus.jl          # live window
 #   julia -t auto --project=examples examples/nucleus.jl check    # headless run + diagnostics
-#                                        (append `substrate` for substrate drag of nuclei)
+#        options: drag=relative|substrate  Jw=<own-nucleus wrap coupling>  k=<spring constant>
+#                 ηn=<nucleus line tension>
 #   julia -t auto --project=examples examples/nucleus.jl movie    # writes output/nucleus.mp4
 #   julia -t auto --project=examples examples/nucleus.jl test     # isolated-pair checks
 #
@@ -12,8 +13,12 @@
 # Model. Every cell (type 1) contains one nucleus (type 2), a Fourier contour
 # body of its own whose `parent` is the cell.
 #
-#   - Overlap: a nucleus overlapping its own cell costs nothing (`related`
-#     coupling 0); overlap with any other cell or nucleus costs J > 0.
+#   - Overlap: overlap with any other cell or nucleus costs J > 0 per unit
+#     area. A cell and its own nucleus gain -Jw per unit overlap area
+#     (negative `related` coupling): the membrane wraps the nucleus, and parts
+#     of the nucleus poking out are pulled back. This does not cause wetting:
+#     the overlap is at most the (fixed) nucleus area, and a nucleus fully
+#     inside its cell feels no force from it.
 #   - Activity: the nucleus has v0 = 0. Its orientation θ diffuses
 #     independently of the cell's (rotational noise Dr) but only sets the frame
 #     of its shape modes.
@@ -251,6 +256,27 @@ function report(sim)
         round(mean(p[typ .== NUCLEUS]); digits = 3))
 end
 
+"""
+Shape statistics per body type, to detect artefacts such as wetting or
+excited high modes: mean amplitude |cₙ| = √(aₙ² + bₙ²) of each mode n, mean
+and maximum shape index, and the area range relative to πR0² (fixed by the
+hard area constraint up to quadrature error).
+"""
+function shape_report(sim)
+    coef = Array(sim.bodies.coef)
+    typ = Array(sim.bodies.type)
+    K = nmodes(sim.basis)
+    p = Array(shape_index(sim))
+    A = Array(areas(sim)) ./ (π .* Array(sim.bodies.R0) .^ 2)
+    for (t, name) in ((CELL, "cells "), (NUCLEUS, "nuclei"))
+        sel = typ .== t
+        amp = [mean(sqrt.(coef[1 + m, sel] .^ 2 .+ coef[1 + K + m, sel] .^ 2)) for m in 1:K]
+        println("  ", name, "  ⟨|cₙ|⟩ n = 2…", K + 1, ": ", join(round.(amp; sigdigits = 2), " "),
+            "   p mean/max = ", round(mean(p[sel]); digits = 3), "/", round(maximum(p[sel]); digits = 3),
+            "   A/πR0² ∈ [", round(minimum(A[sel]); digits = 4), ", ", round(maximum(A[sel]); digits = 4), "]")
+    end
+end
+
 # ---------------------------------------------------------------------------
 # Plotting: cells coloured by shape index, nuclei drawn on top in one colour
 # (their value lies above the colour range and is shown with `highclip`).
@@ -287,28 +313,35 @@ end
 # ---------------------------------------------------------------------------
 # Parameters: "soft fluid" cells of Saito & Ishihara (2024), Fig. 2C
 
-# overlap couplings indexed (type_i, type_j); same-parent pairs use `related`
-const J = [1.0 1.0; 1.0 1.0]
-const JRELATED = [0.0 0.0; 0.0 0.0]
-const ENERGIES = (OnTypes(Tension(0.01), CELL), OnTypes(Tension(0.05), NUCLEUS),
-    Overlap(J; related = JRELATED))
+# Overlap couplings indexed (type_i, type_j); same-parent pairs use `related`.
+# Jw > 0 makes cell and own nucleus gain -Jw per unit overlap area, so the
+# membrane wraps the nucleus and protruding parts are pulled back. A nucleus
+# fully inside its cell feels no force from it: its contour sees a uniform
+# pressure, which the hard area constraint cancels exactly.
+function energies(; Jw = WRAP, ηn = 0.05)
+    J = [1.0 1.0; 1.0 1.0]
+    Jrelated = [0.0 -Jw; -Jw 0.0]
+    return (OnTypes(Tension(0.01), CELL), OnTypes(Tension(ηn), NUCLEUS),
+        Overlap(J; related = Jrelated))
+end
 cell_type(; v0 = 0.06, Dr = 0.01) = BodyType(; v0, Dr, μab = 0.1)
 nucleus_type(; Dr = 0.01) = BodyType(; v0 = 0.0, Dr, μab = 0.1)
-const SPRING = CentreSpring(1.0)
+const WRAP = 2.0                # Jw, own-nucleus wrap coupling (> J: wins against neighbours)
+const SPRING = CentreSpring(0.2)
 const DRAG = RelativeDrag(1.0)
 
 # ---------------------------------------------------------------------------
 # Checks on an isolated cell–nucleus pair (no noise, no contacts)
 
 "Cell at the box centre, nucleus displaced by `δ0` along x; orientation θ = 0."
-function isolated_pair(; v0, drag, δ0 = 0.0, L = 20.0)
+function isolated_pair(; v0, drag, δ0 = 0.0, L = 20.0, Jw = 0.0, ηn = 0.05, spring = SPRING)
     cells = Bodies([L / 2], [L / 2], [0.0], [1.0; zeros(10)][:, :], [1.0])
     bodies, anchor = with_nuclei(cells)
     bodies.x[2] += δ0
     bodies.θ[2] = 0.0
     sim = Simulation(bodies, PeriodicBox(L, L); types = (cell_type(; v0, Dr = 0.0),
-        nucleus_type(; Dr = 0.0)), energies = ENERGIES, dt = 0.005)
-    return sim, nucleus_model(sim, SPRING, drag, anchor)
+        nucleus_type(; Dr = 0.0)), energies = energies(; Jw, ηn), dt = 0.005)
+    return sim, nucleus_model(sim, spring, drag, anchor)
 end
 
 "Run `t` time units; return cell speed (last half) and final lag x_c - x_n."
@@ -332,13 +365,13 @@ function run_tests()
     ok = true
     println("isolated pair, relative drag: the composite moves at v0, no lag")
     sim, m = isolated_pair(; v0, drag = DRAG)
-    V, δ = drift(sim, m, 50.0)
+    V, δ = drift(sim, m, 100.0)
     ok &= check("speed", V, v0; atol = 1e-12)
     ok &= check("lag", δ, 0.0; atol = 1e-12)
 
     println("isolated pair, substrate drag: V = v0/2, lag v0/(2k)")
     sim, m = isolated_pair(; v0, drag = nothing)
-    V, δ = drift(sim, m, 50.0)
+    V, δ = drift(sim, m, 100.0)
     ok &= check("speed", V, v0 / 2; atol = 1e-9)
     ok &= check("lag", δ, v0 / (2k); atol = 1e-9)
 
@@ -351,6 +384,27 @@ function run_tests()
     # explicit Euler of δ̇ = -μi k δ
     ok &= check("nucleus offset", sim.bodies.x[2] - sim.bodies.x[1], δ0 * (1 - μi * k * sim.dt)^n;
         atol = 1e-14)
+
+    # A soft nucleus starting half outside its cell, without spring. The wrap
+    # coupling must pull it in without wetting artefacts (excited modes,
+    # irregular shape); without it the nucleus stays where it is.
+    for Jw in (0.0, WRAP)
+        println("pull-in, Jw = $Jw: soft nucleus starting 0.2 R₀ outside, no spring")
+        sim, m = isolated_pair(; v0 = 0.0, drag = DRAG, δ0 = 0.7, Jw, ηn = 0.005,
+            spring = CentreSpring(0.0))
+        nucleus_step!(sim, m, round(Int, 50 / sim.dt))
+        d = nucleus_diagnostics(sim)
+        if Jw == 0
+            ok &= check("protrusion", d.protrusion[1], 0.2; atol = 1e-12)
+        else
+            K = nmodes(sim.basis)
+            c = Array(sim.bodies.coef)
+            amp = maximum(hypot(c[1 + q, 2], c[1 + K + q, 2]) for q in 1:K)
+            ok &= check("protrusion (positive part)", max(d.protrusion[1], 0.0), 0.0; atol = 1e-3)
+            ok &= check("largest nucleus mode amplitude", amp, 0.0; atol = 0.01)
+            ok &= check("nucleus shape index", Array(shape_index(sim))[2], 2sqrt(π); atol = 1e-3)
+        end
+    end
     ok || error("nucleus checks failed")
     return nothing
 end
@@ -358,12 +412,12 @@ end
 # ---------------------------------------------------------------------------
 # Monolayer
 
-function monolayer(; drag = DRAG)
+function monolayer(; drag = DRAG, Jw = WRAP, k = SPRING.k, ηn = 0.05)
     cells, box = hexagonal_monolayer(32, 32; packing = 0.95)
     bodies, anchor = with_nuclei(cells; ratio = 0.5)
-    sim = Simulation(bodies, box; types = (cell_type(), nucleus_type()), energies = ENERGIES,
+    sim = Simulation(bodies, box; types = (cell_type(), nucleus_type()), energies = energies(; Jw, ηn),
         dt = 0.005)
-    return sim, nucleus_model(sim, SPRING, drag, anchor)
+    return sim, nucleus_model(sim, CentreSpring(k), drag, anchor)
 end
 
 "Mean cell displacement |Δr| over the whole run, for comparing drag models."
@@ -374,16 +428,23 @@ mode = get(ARGS, 1, "live")
 if mode == "test"
     run_tests()
 elseif mode == "check"
-    drag = get(ARGS, 2, "relative") == "substrate" ? nothing : DRAG
-    sim, m = monolayer(; drag)
+    # options as key=value: drag=relative|substrate, Jw=<wrap coupling>, k=<spring>
+    opts = Dict(Pair(split(a, "=")...) for a in ARGS[2:end])
+    drag = get(opts, "drag", "relative") == "substrate" ? nothing : DRAG
+    Jw = parse(Float64, get(opts, "Jw", string(WRAP)))
+    k = parse(Float64, get(opts, "k", string(SPRING.k)))
+    ηn = parse(Float64, get(opts, "ηn", "0.05"))
+    println("drag = ", drag === nothing ? "substrate" : "relative", ", Jw = ", Jw, ", k = ", k, ", ηn = ", ηn)
+    sim, m = monolayer(; drag, Jw, k, ηn)
     X0 = unwrapped_positions(sim)
     for _ in 1:10
         nucleus_step!(sim, m, 2_000)
         report(sim)
     end
+    shape_report(sim)
     println("mean cell displacement: ", round(mean_cell_displacement(sim, X0); digits = 3))
     mkpath(joinpath(@__DIR__, "..", "output"))
-    path = joinpath(@__DIR__, "..", "output", "nucleus.png")
+    path = joinpath(@__DIR__, "..", "output", "nucleus_Jw$(Jw)_k$(k)_eta$(ηn).png")
     save(path, first(nucleus_plot(sim)))
     println("wrote ", path)
 elseif mode == "movie"
@@ -435,13 +496,24 @@ end
 #
 # Modelling observations (to discuss):
 #
-# - With `related` = 0 the cell membrane does not feel its own nucleus. An
-#   elongating cell can therefore narrow past it: after t = 100, one nucleus
-#   pokes out of its cell. With relative drag the cells deform more (see
-#   below) and 7 nuclei protrude at t = 100 (by up to 0.027 R₀). Confinement
-#   would need an energy for the area of a nucleus *outside* its own cell
-#   (d < 0 for the related pair), i.e. an interaction range of about a
-#   nucleus diameter.
+# - Confinement. With `related` = 0 the membrane does not feel its own
+#   nucleus, so elongating cells narrow past it: 6–7 nuclei protrude at
+#   t = 100 (by up to 0.027 R₀). The wrap coupling Jw (negative `related`
+#   overlap) fixes this at no extra cost. Monolayer at t = 100 (relative
+#   drag; protruding nuclei, nucleus ⟨|cₙ|⟩ for n = 2 and 6, max nucleus p):
+#     Jw = 0, k = 1                  7   7e-5 / 1e-5   3.551
+#     Jw = 2, k = 1                  1   7e-5 / 1e-5   3.549   (0.001 R₀)
+#     Jw = 0, k = 0.2                6   3e-5 / 6e-6   3.546
+#     Jw = 2, k = 0.2                0   3e-5 / 5e-6   3.545
+#     Jw = 2, k = 0.2, ηn = 0.005    0   4e-5 / 2e-5   3.546
+#     Jw = 5, k = 0.2, ηn = 0.005    0   5e-5 / 2e-5   3.547
+#   Cell shapes and displacements are unchanged within noise. No wetting:
+#   a soft nucleus started 0.2 R₀ outside its cell (no spring) is pulled in
+#   by t = 2. Its modes stay ≤ 0.005 and fall off with n. The cell bulges
+#   briefly (|c₂| ≈ 0.014) to wrap the nucleus, and line tension relaxes the
+#   bulge again. Once inside, the nucleus does not stick to the membrane. The
+#   alternative (an energy for nucleus area outside its cell) would need an
+#   interaction range of about a nucleus diameter for all pairs.
 # - Drag (t = 100, same seed; mean cell displacement, ⟨p⟩ of cells):
 #     cells only, no nuclei            0.926   3.821
 #     nuclei with relative drag        0.930   3.825   mean offset < 0.001 R₀
@@ -453,6 +525,6 @@ end
 #   cells-only model, since the nuclei are rarely touched by other bodies.
 # - The spring acts on the polar origins r, which differ from the area
 #   centroids once modes n ≥ 2 are excited (products of modes create n = 1
-#   harmonics in ∮ R³ e_φ dφ).
+#   harmonics in ∮ R³ e_φ dφ). Accepted for now.
 # - With line tension 0.05 the nuclei stay circular (⟨p⟩ = 3.545); they are
 #   rarely touched by other bodies.
