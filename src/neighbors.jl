@@ -103,8 +103,9 @@ The capacity grows automatically when exceeded.
 Verlet skin: the list stays valid while no pair can have closed the `skin`
 gap. With the drift δᵢ = |rᵢ - rᵢ⁰| + max(0, rmaxᵢ - rmaxᵢ⁰) since the last
 build (positions `x0`, `y0`, bounds `rmax0`), an unlisted pair is still out of
-range while δᵢ + δⱼ ≤ skin, so the list is rebuilt once 2 max δ > skin. With
-`skin = 0` it is rebuilt every step. `builds` counts the builds.
+range while δᵢ + δⱼ ≤ skin, so the list is rebuilt once some 2δᵢ > skin (each
+body checks itself and raises a flag, see `skin_check!`). With `skin = 0` it
+is rebuilt every step. `builds` counts the builds.
 """
 mutable struct NeighborList{T, MI <: AbstractMatrix{Int32}, VI <: AbstractVector{Int32}, V <: AbstractVector{T}}
     idx::MI
@@ -113,7 +114,6 @@ mutable struct NeighborList{T, MI <: AbstractMatrix{Int32}, VI <: AbstractVector
     const x0::V
     const y0::V
     const rmax0::V
-    const drift::V
     valid::Bool
     builds::Int
 end
@@ -123,7 +123,7 @@ function NeighborList(N::Integer, ::Type{T} = Float64; skin = 0, capacity::Integ
     skin >= 0 || throw(ArgumentError("skin must be non-negative"))
     vec() = KernelAbstractions.zeros(backend, T, N)
     return NeighborList(KernelAbstractions.zeros(backend, Int32, capacity, N),
-        KernelAbstractions.zeros(backend, Int32, N), T(skin), vec(), vec(), vec(), vec(), false, 0)
+        KernelAbstractions.zeros(backend, Int32, N), T(skin), vec(), vec(), vec(), false, 0)
 end
 
 capacity(nl::NeighborList) = size(nl.idx, 1)
@@ -173,29 +173,32 @@ capacity(nl::NeighborList) = size(nl.idx, 1)
     end
 end
 
-# Drift of each body since the last neighbour list build, the quantity bounded
-# by the Verlet skin (see NeighborList). One work item per body i.
+# Verlet skin check (see NeighborList). One work item per body i: compute the
+# drift since the last neighbour list build,
+#   δᵢ = |rᵢ - rᵢ⁰| + max(0, rmaxᵢ - rmaxᵢ⁰),
+# and raise the rebuild flag if 2δᵢ > skin. All writers store the same value,
+# so no reduction or atomics are needed.
 #
-#   drift       (out) N, δᵢ = |rᵢ - rᵢ⁰| + max(0, rmaxᵢ - rmaxᵢ⁰)
+#   status      (in/out) run status, entry STATUS_REBUILD set to 1 if needed
 #   x, y, rmax  N, current wrapped positions and contour radius bounds
 #   x0, y0, rmax0  N, the same at the last build
-#   Lx, Ly      box size (minimum image of the displacement)
-@kernel function drift_kernel!(drift, @Const(x), @Const(y), @Const(rmax), @Const(x0), @Const(y0),
-        @Const(rmax0), Lx, Ly)
+#   Lx, Ly      box size (minimum image of the displacement); skin: Verlet skin
+@kernel function skin_check_kernel!(status, @Const(x), @Const(y), @Const(rmax), @Const(x0),
+        @Const(y0), @Const(rmax0), Lx, Ly, skin)
     @inbounds begin
         i = @index(Global)
         dx = minimum_image(x[i] - x0[i], Lx)
         dy = minimum_image(y[i] - y0[i], Ly)
-        drift[i] = sqrt(dx^2 + dy^2) + max(zero(dx), rmax[i] - rmax0[i])
+        δ = sqrt(dx^2 + dy^2) + max(zero(dx), rmax[i] - rmax0[i])
+        2δ > skin && (status[STATUS_REBUILD] = Int32(1))
     end
 end
 
-"Whether the neighbour list `nl` must be rebuilt for the current state."
-function needs_rebuild(nl::NeighborList, bodies::Bodies, rmax, box::PeriodicBox)
-    (nl.valid && nl.skin > 0) || return true
-    drift_kernel!(get_backend(nl.drift), WORKGROUP)(nl.drift, bodies.x, bodies.y, rmax, nl.x0,
-        nl.y0, nl.rmax0, box.Lx, box.Ly; ndrange = length(nl.drift))
-    return 2 * maximum(nl.drift) > nl.skin
+"Raise the rebuild flag in `status` if the Verlet skin of `nl` is exceeded (no host sync)."
+function skin_check!(status, nl::NeighborList, bodies::Bodies, rmax, box::PeriodicBox)
+    skin_check_kernel!(get_backend(status), WORKGROUP)(status, bodies.x, bodies.y, rmax, nl.x0,
+        nl.y0, nl.rmax0, box.Lx, box.Ly, nl.skin; ndrange = nbodies(bodies))
+    return status
 end
 
 """

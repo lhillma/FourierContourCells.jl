@@ -88,9 +88,10 @@ end
 #   R0, type     N, radius scale and type (passed to `energy` via BodyInfo)
 #   terms        tuple of BodyTerms
 #   nθ, Δφ       number of nodes and node spacing 2π/nθ
+#   status       run status; nothing is done while it is frozen (see isactive)
 @kernel function body_terms_kernel!(GR, GD, GDD, E, @Const(R), @Const(dR), @Const(ddR),
-        @Const(R0), @Const(type), terms, nθ, Δφ)
-    @inbounds begin
+        @Const(R0), @Const(type), terms, nθ, Δφ, status)
+    @inbounds if isactive(status)
         i = @index(Global)
         info = BodyInfo(R0[i], type[i])
         E[i] += _body_terms!(terms, GR, GD, GDD, R, dR, ddR, i, info, nθ, Δφ)
@@ -143,14 +144,15 @@ n_integrands(terms::Tuple, ::Type{T}) where {T} =
 #   N            number of bodies (the ndrange is padded, see node_launch)
 #   Δφ           node spacing 2π/nθ
 #   nq           Val(total number of integrands), sizes the local buffer
+#   status       run status; nothing is done while it is frozen (uniform per launch)
 @kernel function body_terms_node_kernel!(GR, GD, GDD, E, @Const(R), @Const(dR), @Const(ddR),
-        @Const(R0), @Const(type), terms, N, Δφ, nq)
+        @Const(R0), @Const(type), terms, N, Δφ, nq, status)
     @uniform nθ = @groupsize()[1]
     @uniform B = @groupsize()[2]
     qbuf = @localmem eltype(GR) (nθ, B, _val(nq))
     k, i = @index(Global, NTuple)
     _, b = @index(Local, NTuple)
-    @inbounds if i <= N
+    @inbounds if i <= N && isactive(status)
         q = _node_integrands(terms, type[i], R[k, i], dR[k, i], ddR[k, i])
         for c in 1:_val(nq)
             qbuf[k, b, c] = q[c]
@@ -160,7 +162,7 @@ n_integrands(terms::Tuple, ::Type{T}) where {T} =
     k, i = @index(Global, NTuple)
     _, b = @index(Local, NTuple)
     # no @inbounds here: measured slower with it on CUDA (218 vs 191 µs, N = 16384)
-    if i <= N
+    if i <= N && isactive(status)
         Q = _sum_nodes(qbuf, b, nθ, nq) * Δφ
         info = BodyInfo(R0[i], type[i])
         e, g = _node_gradients(terms, Q, info, R[k, i], dR[k, i], ddR[k, i], Δφ)
@@ -185,7 +187,7 @@ _val(::Val{n}) where {n} = n
 end
 
 function body_terms!(g::Gradients, terms::Tuple, geom::Geometry, bodies::Bodies, basis::FourierBasis,
-        layout::KernelLayout = BodyParallel())
+        layout::KernelLayout = BodyParallel(); status = nothing)
     isempty(terms) && return g
     backend = get_backend(g.GR)
     N = nbodies(bodies)
@@ -194,10 +196,10 @@ function body_terms!(g::Gradients, terms::Tuple, geom::Geometry, bodies::Bodies,
         wg, nd = node_launch(basis.nθ, N)
         body_terms_node_kernel!(backend, wg)(g.GR, g.GD, g.GDD, g.Ebody, geom.R, geom.dR,
             geom.ddR, bodies.R0, bodies.type, terms, Int32(N), basis.Δφ,
-            Val(n_integrands(terms, T)); ndrange = nd)
+            Val(n_integrands(terms, T)), status; ndrange = nd)
     else
         body_terms_kernel!(backend, WORKGROUP)(g.GR, g.GD, g.GDD, g.Ebody, geom.R, geom.dR,
-            geom.ddR, bodies.R0, bodies.type, terms, basis.nθ, basis.Δφ; ndrange = N)
+            geom.ddR, bodies.R0, bodies.type, terms, basis.nθ, basis.Δφ, status; ndrange = N)
     end
     return g
 end
@@ -224,8 +226,9 @@ end
 #   R, dR       nθ × N, contour radius and dR/dφ
 #   nθ, Δφ      number of nodes and node spacing
 #   cs          2 × nθ, (cos φₖ, sin φₖ) of the nodes
-@kernel function contact_gradient_kernel!(GR, gx, gy, gθ, @Const(P), @Const(R), @Const(dR), nθ, Δφ, @Const(cs))
-    @inbounds begin
+#   status      run status; nothing is done while it is frozen (see isactive)
+@kernel function contact_gradient_kernel!(GR, gx, gy, gθ, @Const(P), @Const(R), @Const(dR), nθ, Δφ, @Const(cs), status)
+    @inbounds if isactive(status)
         i = @index(Global)
         fx = zero(eltype(gx))
         fy = zero(eltype(gy))
@@ -247,10 +250,10 @@ end
     end
 end
 
-function contact_gradient!(g::Gradients, geom::Geometry, basis::FourierBasis)
+function contact_gradient!(g::Gradients, geom::Geometry, basis::FourierBasis; status = nothing)
     backend = get_backend(g.GR)
     contact_gradient_kernel!(backend, WORKGROUP)(g.GR, g.gx, g.gy, g.gθ, g.P, geom.R, geom.dR,
-        basis.nθ, basis.Δφ, basis.cs; ndrange = size(g.P, 2))
+        basis.nθ, basis.Δφ, basis.cs, status; ndrange = size(g.P, 2))
     return g
 end
 

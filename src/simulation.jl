@@ -37,7 +37,7 @@ of that type to have a parent with substrate drag.
 """
 mutable struct Simulation{T, Ba <: FourierBasis{T}, Bo <: Bodies, G <: Geometry,
         Gr <: Gradients, CL <: CellList, NL <: NeighborList, ChL <: ChildList, BL <: BondList, BT <: Tuple,
-        CT <: Tuple, BoT <: Tuple, TT <: Tuple, Mat, H, L <: KernelLayout}
+        CT <: Tuple, BoT <: Tuple, TT <: Tuple, Mat, H, L <: KernelLayout, VS <: AbstractVector{Int32}, VC <: AbstractVector{Int64}}
     const basis::Ba
     const box::PeriodicBox{T}
     const bodies::Bo
@@ -56,6 +56,9 @@ mutable struct Simulation{T, Ba <: FourierBasis{T}, Bo <: Bodies, G <: Geometry,
     const disp::Mat
     const hook::H
     const layout::L
+    const status::VS
+    const clock::VC
+    const graph::Base.RefValue{Any}
     dt::T
     t::T
     step::Int
@@ -95,6 +98,8 @@ function Simulation(bodies::Bodies, box::PeriodicBox; types, energies = (), bond
     bondlist = BondList(bonds, nbodies(host); backend)
     sim = Simulation(basis, box, dev, Geometry(basis, dev), Gradients(basis, dev), cells, neighbors,
         children, bondlist, body_terms, contact_terms, bond_terms, types, philox_key(seed), noise, disp, hook!, layout,
+        KernelAbstractions.zeros(backend, Int32, STATUS_LENGTH), KernelAbstractions.zeros(backend, Int64, 1),
+        Ref{Any}(nothing),
         T(dt), zero(T), 0)
     enforce_shape!(dev, basis)
     update_geometry!(sim.geom, basis, dev)
@@ -128,9 +133,13 @@ always with `force = true`. Requires up-to-date geometry.
 """
 function update_neighbors!(sim::Simulation; force::Bool = false)
     nl = sim.neighbors
-    force || needs_rebuild(nl, sim.bodies, sim.geom.rmax, sim.box) || return sim
+    if !force && nl.valid && nl.skin > 0
+        skin_check!(sim.status, nl, sim.bodies, sim.geom.rmax, sim.box)
+        to_host(sim.status)[STATUS_REBUILD] == 0 && return sim
+    end
     update_celllist!(sim.cells, sim.bodies)
     update_neighbors!(nl, sim.cells, sim.bodies, sim.geom.rmax, sim.box, contact_range(sim.contact_terms))
+    fill!(sim.status, 0)
     return sim
 end
 
@@ -142,10 +151,11 @@ Requires up-to-date geometry and neighbour lists (see [`update_neighbors!`](@ref
 """
 function compute_gradients!(sim::Simulation)
     (; basis, box, bodies, geom, grad, neighbors) = sim
+    status = sim.status
     reset!(grad)
-    body_terms!(grad, sim.body_terms, geom, bodies, basis, sim.layout)
+    body_terms!(grad, sim.body_terms, geom, bodies, basis, sim.layout; status)
     isempty(sim.contact_terms) ||
-        contact_gradients!(grad, sim.contact_terms, geom, bodies, neighbors, box, basis)
+        contact_gradients!(grad, sim.contact_terms, geom, bodies, neighbors, box, basis; status)
     bond_gradient!(grad, sim.bond_terms, bodies, sim.bonds, box)
     pullback!(grad, geom, bodies, basis)
     return grad
@@ -159,37 +169,76 @@ Advance the simulation by `n` Euler–Maruyama steps.
 function step!(sim::Simulation, n::Integer = 1)
     for _ in 1:n
         isempty(sim.contact_terms) || update_neighbors!(sim)
-        compute_gradients!(sim)
-        sim.hook === nothing || sim.hook(sim)
-        philox_noise!(sim.noise, sim.key, sim.step)
-        integrate!(sim.bodies, sim.grad, sim.disp, sim.noise, sim.children, sim.types, sim.dt,
-            sim.box, sim.basis)
-        update_geometry!(sim.geom, sim.basis, sim.bodies)
+        advance!(sim)
         sim.t += sim.dt
         sim.step += 1
     end
     return sim
 end
 
+# One step after the neighbour list update: gradients, hook, noise (draw index
+# from the device clock), integration and geometry. Only device operations
+# apart from the hook.
+function advance!(sim::Simulation)
+    compute_gradients!(sim)
+    sim.hook === nothing || sim.hook(sim)
+    philox_noise!(sim.noise, sim.key, sim.clock)
+    integrate!(sim.bodies, sim.grad, sim.disp, sim.noise, sim.children, sim.types, sim.dt,
+        sim.box, sim.basis; clock = sim.clock, status = sim.status)
+    update_geometry!(sim.geom, sim.basis, sim.bodies)
+    return sim
+end
+
 """
-    run!(sim, nsteps; every = 0, callback = nothing)
+    device_step!(sim)
+
+One step without host synchronisation, for capture in a CUDA graph: the skin
+check only raises the rebuild flag in `sim.status`, which freezes this and all
+following steps (see `isactive`) until the host rebuilds the neighbour list.
+Requires a valid neighbour list with `skin > 0` and no hook; `sim.t` and
+`sim.step` are not updated (the device clock is).
+"""
+function device_step!(sim::Simulation)
+    isempty(sim.contact_terms) ||
+        skin_check!(sim.status, sim.neighbors, sim.bodies, sim.geom.rmax, sim.box)
+    advance!(sim)
+    return sim
+end
+
+"Whether `sim` can run in graph mode (see [`run!`](@ref))."
+graph_capable(sim::Simulation) =
+    sim.hook === nothing && (isempty(sim.contact_terms) || sim.neighbors.skin > 0)
+
+"""
+    run!(sim, nsteps; every = 0, callback = nothing, graph = true)
 
 Advance `nsteps` steps, calling `callback(sim)` every `every` steps.
+
+With `graph = true`, backends that support it run the steps between callbacks
+as captured graphs (CUDA, via the CUDA extension: one launch per step and one
+host synchronisation per chunk of steps instead of one per step). Results are
+identical to [`step!`](@ref). Graph mode needs `hook! = nothing` and, with
+contact terms, a Verlet `skin > 0`; otherwise `run!` steps eagerly.
 """
-function run!(sim::Simulation, nsteps::Integer; every::Integer = 0, callback = nothing)
+function run!(sim::Simulation, nsteps::Integer; every::Integer = 0, callback = nothing,
+        graph::Bool = true)
+    advance(n) = graph && graph_capable(sim) ? run_steps!(get_backend(sim.bodies.x), sim, n) : step!(sim, n)
     if callback === nothing || every <= 0
-        step!(sim, nsteps)
+        advance(nsteps)
     else
         done = 0
         while done < nsteps
             n = min(every, nsteps - done)
-            step!(sim, n)
+            advance(n)
             done += n
             callback(sim)
         end
     end
     return sim
 end
+
+"Run `n` steps on `backend`; extensions add graph-based methods (default: [`step!`](@ref))."
+run_steps!(backend, sim::Simulation, n::Integer) = step!(sim, n)
 
 function Base.show(io::IO, sim::Simulation{T}) where {T}
     print(io, "Simulation{$T}(N=$(nbodies(sim)), $(sim.basis), box=$(sim.box.Lx)×$(sim.box.Ly), ",

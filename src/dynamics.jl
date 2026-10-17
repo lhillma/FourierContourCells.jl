@@ -157,10 +157,13 @@ end
 #   ξ            3 × N standard normal random numbers (row 3 used)
 #   types        tuple of BodyType (isbits, indexed with the type)
 #   dt           time step; Lx, Ly: box size; K: number of shape modes
+#   clock        (in/out) device step counter, incremented once (or nothing)
+#   status       run status; the kernel does nothing while it is frozen (see isactive)
 @kernel function euler_maruyama_kernel!(x, y, θ, imgx, imgy, coef, @Const(type), @Const(dx),
-        @Const(dy), @Const(gθ), @Const(gcoef), @Const(ξ), types, dt, Lx, Ly, K)
-    @inbounds begin
+        @Const(dy), @Const(gθ), @Const(gcoef), @Const(ξ), types, dt, Lx, Ly, K, clock, status)
+    @inbounds if isactive(status)
         i = @index(Global)
+        tick!(clock, i)
         p = types[type[i]]
         xn = x[i] + dx[i]
         yn = y[i] + dy[i]
@@ -179,13 +182,14 @@ end
 end
 
 """
-    integrate!(bodies, grad, disp, ξ, children, types, dt, box, basis)
+    integrate!(bodies, grad, disp, ξ, children, types, dt, box, basis; clock, status)
 
 One Euler–Maruyama step: translational displacements into `disp` (2 × N),
-then the update of all body variables.
+then the update of all body variables. `clock` (device step counter) is
+incremented; nothing is updated while `status` is frozen.
 """
 function integrate!(bodies::Bodies, g::Gradients, disp, ξ, children::ChildList, types::Tuple, dt,
-        box::PeriodicBox, basis::FourierBasis)
+        box::PeriodicBox, basis::FourierBasis; clock = nothing, status = nothing)
     backend = get_backend(bodies.x)
     N = nbodies(bodies)
     dx = view(disp, 1, :)
@@ -194,6 +198,6 @@ function integrate!(bodies::Bodies, g::Gradients, disp, ξ, children::ChildList,
         g.gy, ξ, children.idx, children.count, types, dt; ndrange = N)
     euler_maruyama_kernel!(backend, WORKGROUP)(bodies.x, bodies.y, bodies.θ, bodies.imgx,
         bodies.imgy, bodies.coef, bodies.type, dx, dy, g.gθ, g.gcoef, ξ, types, dt, box.Lx,
-        box.Ly, nmodes(basis); ndrange = N)
+        box.Ly, nmodes(basis), clock, status; ndrange = N)
     return bodies
 end

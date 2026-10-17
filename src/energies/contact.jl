@@ -102,10 +102,11 @@ end
 #   Lx, Ly     box size; K: number of shape modes
 #   cs         2 × nθ, (cos φₖ, sin φₖ) of the nodes (FourierBasis.cs)
 #   range      largest interaction range of the terms beyond contact
+#   status     run status; nothing is done while it is frozen (see isactive)
 @kernel function contact_pressure_kernel!(P, @Const(x), @Const(y), @Const(R), @Const(lab),
         @Const(rmax), @Const(R0), @Const(type), @Const(parent), @Const(nidx), @Const(ncount),
-        terms, Lx, Ly, K, @Const(cs), range)
-    @inbounds begin
+        terms, Lx, Ly, K, @Const(cs), range, status)
+    @inbounds if isactive(status)
         k, i = @index(Global, NTuple)
         P[k, i] = _node_pressure(k, i, x, y, R, lab, rmax, R0, type, parent, nidx, ncount, terms,
             Lx, Ly, K, cs, range)
@@ -118,12 +119,12 @@ end
 Sum of contact energy densities g at every contour node of every body.
 """
 function contact_pressure!(P, terms::Tuple, geom::Geometry, bodies::Bodies, nl::NeighborList,
-        box::PeriodicBox, basis::FourierBasis)
+        box::PeriodicBox, basis::FourierBasis; status = nothing)
     T = eltype(P)
     backend = get_backend(P)
     contact_pressure_kernel!(backend, (basis.nθ, max(1, WORKGROUP ÷ basis.nθ)))(P, bodies.x,
         bodies.y, geom.R, geom.lab, geom.rmax, bodies.R0, bodies.type, bodies.parent, nl.idx,
-        nl.count, terms, box.Lx, box.Ly, nmodes(basis), basis.cs, T(contact_range(terms));
+        nl.count, terms, box.Lx, box.Ly, nmodes(basis), basis.cs, T(contact_range(terms)), status;
         ndrange = (basis.nθ, nbodies(bodies)))
     return P
 end
@@ -139,16 +140,17 @@ end
 #   gx, gy, gθ  (in/out) N, ∂E/∂x, ∂E/∂y, ∂E/∂θ (accumulated)
 #   N           number of bodies (the ndrange is padded, see node_launch)
 #   Δφ          node spacing (quadrature weight)
+#   status      run status; nothing is done while it is frozen (uniform per launch)
 #   other arguments as in contact_pressure_kernel!; dR: nθ × N, dR/dφ
 @kernel function contact_node_kernel!(P, GR, gx, gy, gθ, @Const(x), @Const(y), @Const(R),
         @Const(dR), @Const(lab), @Const(rmax), @Const(R0), @Const(type), @Const(parent),
-        @Const(nidx), @Const(ncount), terms, N, Lx, Ly, K, Δφ, @Const(cs), range)
+        @Const(nidx), @Const(ncount), terms, N, Lx, Ly, K, Δφ, @Const(cs), range, status)
     @uniform nθ = @groupsize()[1]
     @uniform B = @groupsize()[2]
     fbuf = @localmem eltype(GR) (nθ, B, 3)
     k, i = @index(Global, NTuple)
     _, b = @index(Local, NTuple)
-    @inbounds if i <= N
+    @inbounds if i <= N && isactive(status)
         g = _node_pressure(k, i, x, y, R, lab, rmax, R0, type, parent, nidx, ncount, terms,
             Lx, Ly, K, cs, range)
         P[k, i] = g
@@ -165,7 +167,7 @@ end
     @synchronize
     k, i = @index(Global, NTuple)
     _, b = @index(Local, NTuple)
-    @inbounds if i <= N && k == 1
+    @inbounds if i <= N && k == 1 && isactive(status)
         fx = zero(eltype(GR))
         fy = zero(eltype(GR))
         tθ = zero(eltype(GR))
@@ -188,7 +190,7 @@ centre force and torque into `g.gx`, `g.gy`, `g.gθ` (accumulated). Uses the
 fused node-parallel kernel on all backends unless nθ exceeds a workgroup.
 """
 function contact_gradients!(g::Gradients, terms::Tuple, geom::Geometry, bodies::Bodies,
-        nl::NeighborList, box::PeriodicBox, basis::FourierBasis)
+        nl::NeighborList, box::PeriodicBox, basis::FourierBasis; status = nothing)
     if uses_node_layout(NodeParallel(), basis.nθ)
         T = eltype(g.GR)
         N = nbodies(bodies)
@@ -196,10 +198,10 @@ function contact_gradients!(g::Gradients, terms::Tuple, geom::Geometry, bodies::
         contact_node_kernel!(get_backend(g.GR), wg)(g.P, g.GR, g.gx, g.gy, g.gθ, bodies.x,
             bodies.y, geom.R, geom.dR, geom.lab, geom.rmax, bodies.R0, bodies.type,
             bodies.parent, nl.idx, nl.count, terms, Int32(N), box.Lx, box.Ly, nmodes(basis),
-            basis.Δφ, basis.cs, T(contact_range(terms)); ndrange = nd)
+            basis.Δφ, basis.cs, T(contact_range(terms)), status; ndrange = nd)
     else
-        contact_pressure!(g.P, terms, geom, bodies, nl, box, basis)
-        contact_gradient!(g, geom, basis)
+        contact_pressure!(g.P, terms, geom, bodies, nl, box, basis; status)
+        contact_gradient!(g, geom, basis; status)
     end
     return g
 end

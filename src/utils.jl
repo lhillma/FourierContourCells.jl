@@ -47,6 +47,25 @@ default_layout(backend) = NodeParallel()
 uses_node_layout(::NodeParallel, nθ) = nθ <= WORKGROUP
 uses_node_layout(::BodyParallel, nθ) = false
 
+# Device-side run state of a simulation (see `Simulation`): `status` is a
+# small Int32 vector whose entry STATUS_REBUILD is set by the skin check when
+# the neighbour list must be rebuilt. A set status freezes the remaining work
+# of a step (heavy kernels and the integrator do nothing), which lets a CUDA
+# graph run many steps and stop at the first one that needs a rebuild. Kernels
+# also accept `status = nothing` (never frozen). `clock[1]` counts the steps
+# on the device and is the Philox draw index of the noise.
+const STATUS_REBUILD = 1
+const STATUS_LENGTH = 2  # entry 2 reserved (neighbour list overflow, see notes)
+@inline isactive(::Nothing) = true
+Base.@propagate_inbounds isactive(status::AbstractVector) = status[STATUS_REBUILD] == 0
+@inline draw_index(n::Integer) = n % UInt64
+Base.@propagate_inbounds draw_index(clock::AbstractVector) = clock[1] % UInt64
+@inline tick!(::Nothing, i) = nothing
+Base.@propagate_inbounds function tick!(clock::AbstractVector, i)
+    i == 1 && (clock[1] += one(eltype(clock)))
+    return nothing
+end
+
 # Contour synthesis and its pullback as one stacked matrix product ([C; D; DD],
 # see FourierBasis) or as three. One product saves two launches on GPUs; on
 # the CPU, BLAS is faster with three products for these thin matrices.
