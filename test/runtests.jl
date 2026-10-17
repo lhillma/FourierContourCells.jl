@@ -30,5 +30,6 @@ end
     include("test_parents.jl")
     include("test_random.jl")
     include("test_layout.jl")
+    include("test_cuda.jl")
     include("test_enzyme.jl")
 end

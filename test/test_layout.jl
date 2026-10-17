@@ -7,14 +7,15 @@ FourierContourCells.contour_integrands(::PerimeterArea, R, dR, ddR) = (sqrt(R^2 
 FourierContourCells.energy(t::PerimeterArea, Q, b) = t.λ * (Q[1] - 6.5)^2 + t.κ * (Q[2] - π * b.R0^2)^2 * Q[1]
 
 "Nucleated soft fluid with deformed shapes, for a given kernel layout."
-function layout_sim(layout; nθ = 40)
+function layout_sim(layout; nθ = 40, backend = CPU(), T = Float64)
     cells, box = hexagonal_monolayer(5, 4; packing = 0.97, rng = Xoshiro(2))
     bodies = with_nuclei(cells)
     bodies.coef[2:end, :] .= 0.04 .* randn(Xoshiro(5), size(bodies.coef, 1) - 1, nbodies(bodies))
     types = (BodyType(v0 = 0.2, Dr = 0.1), BodyType(Dr = 0.1, drag = :parent))
     energies = (Tension(0.1), OnTypes(PerimeterArea(0.05, 0.3), 1), OnTypes(PerimeterElasticity(0.2, 3.7), 2),
         Overlap([1.0 1.0; 1.0 1.0]; related = [1.0 -2.0; -2.0 1.0]), LinearRepulsion(0.5))
-    return Simulation(bodies, box; types, energies, bonds = parent_bonds(bodies), nθ, layout, seed = 7)
+    return Simulation(bodies, box; types, energies, bonds = parent_bonds(bodies), nθ, layout, seed = 7,
+        backend, T)
 end
 
 @testset "kernel layouts" begin
