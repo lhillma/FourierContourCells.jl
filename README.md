@@ -204,8 +204,8 @@ Soft fluid (`Tension` + `Overlap`) at packing 0.95, `examples/benchmark.jl`:
 |---:|:---|:---|---:|
 | 1024 | CPU, 1 thread | Float64 | 3.8 (reference C++: 12.0) |
 | 1024 | CPU, 8 threads | Float64 | 1.5 |
-| 1024 | RTX A2000 Laptop GPU | Float32 | 0.17 |
-| 16384 | RTX A2000 Laptop GPU | Float32 | 1.4 |
+| 1024 | RTX A2000 Laptop GPU | Float32 | 0.13 |
+| 16384 | RTX A2000 Laptop GPU | Float32 | 1.0 |
 
 On GPUs, per-node work runs one work item per (contour node, body)
 (`layout = NodeParallel()`, the GPU default); the neighbour list is rebuilt only when
