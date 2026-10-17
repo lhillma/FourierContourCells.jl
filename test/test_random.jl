@@ -14,6 +14,10 @@ using FourierContourCells: philox4x32, philox_key, philox_noise!, philox_normals
         key = philox_key(42)
         ξ = philox_noise!(zeros(T, 3, 100_000), key, 7)
         @test eltype(ξ) == T
+        # no silent promotion (Float64 maths is slow on consumer GPUs)
+        @test philox_normals(T, key, 1, 1) isa NTuple{4, T}
+        @test FourierContourCells.uniform_open(T, 0xffffffff, 0xffffffff) isa T
+        @test 0 < FourierContourCells.uniform_open(T, 0x00000000, 0x00000000) < FourierContourCells.uniform_open(T, 0xffffffff, 0xffffffff) < 1
         for r in 1:3
             @test abs(mean(ξ[r, :])) < 0.015
             @test var(ξ[r, :]) ≈ 1 atol = 0.02

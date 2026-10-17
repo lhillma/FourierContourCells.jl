@@ -35,11 +35,13 @@ Philox4x32 with 10 rounds (Salmon et al., SC '11, doi:10.1145/2063384.2063405).
     return (c0, c1, c2, c3)
 end
 
-# Uniform numbers in the open interval (0, 1): 24 random bits for Float32, 53
-# (from two words) for Float64.
-@inline uniform_open(::Type{Float32}, a::UInt32, b::UInt32) = (Float32(a >> 8) + 0.5f0) * 0x1p-24
+# Uniform numbers in the open interval (0, 1), (j + ½)·2⁻ᵇ for random b-bit j:
+# b = 23 for Float32, 52 (from two words) for Float64, so that j + ½ is exact
+# (with one more bit, the largest value rounds up to 1). Float32 constants
+# avoid silent promotion to Float64, which is slow on consumer GPUs.
+@inline uniform_open(::Type{Float32}, a::UInt32, b::UInt32) = (Float32(a >> 9) + 0.5f0) * Float32(0x1p-23)
 @inline uniform_open(::Type{Float64}, a::UInt32, b::UInt32) =
-    (Float64(((UInt64(a) << 32) | b) >> 11) + 0.5) * 0x1p-53
+    (Float64(((UInt64(a) << 32) | b) >> 12) + 0.5) * 0x1p-52
 
 # Box–Muller: two independent standard normals from two uniforms in (0, 1).
 @inline function box_muller(u1::T, u2::T) where {T}
