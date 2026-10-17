@@ -90,11 +90,107 @@ end
     E[i] += _body_terms!(terms, GR, GD, GDD, R, dR, ddR, i, info, nθ, Δφ)
 end
 
-function body_terms!(g::Gradients, terms::Tuple, geom::Geometry, bodies::Bodies, basis::FourierBasis)
+# Integrands of all terms at one node, concatenated into one SVector; terms
+# that do not apply to the body type contribute zeros.
+@inline _node_integrands(::Tuple{}, type, R, dR, ddR) = SVector{0, typeof(R)}()
+@inline function _node_integrands(terms::Tuple, type, R, dR, ddR)
+    q = as_svector(contour_integrands(first(terms), R, dR, ddR))
+    q = applies_to(first(terms), type) ? q : zero(q)
+    return vcat(q, _node_integrands(Base.tail(terms), type, R, dR, ddR))
+end
+
+# Split Q = [Q_term; Q_rest] after the first m entries.
+@inline _qhead(Q::SVector{L, T}, ::Val{m}) where {L, T, m} = SVector{m, T}(ntuple(c -> Q[c], Val(m)))
+@inline _qtail(Q::SVector{L, T}, ::Val{m}) where {L, T, m} = SVector{L - m, T}(ntuple(c -> Q[m + c], Val(L - m)))
+
+# Energy and contour gradient (∂E/∂R, ∂E/∂R', ∂E/∂R'') at one node of all
+# terms, given the concatenated integrals Q (same chain rule as _body_term!).
+@inline _node_gradients(::Tuple{}, Q, info, R, dR, ddR, Δφ) = (zero(R), zero(SVector{3, typeof(R)}))
+@inline function _node_gradients(terms::Tuple, Q, info, R, dR, ddR, Δφ)
+    t = first(terms)
+    J = as_jacobian(contour_integrand_gradients(t, R, dR, ddR))
+    m = Val(size(J, 1))
+    e, g = _node_gradients(Base.tail(terms), _qtail(Q, m), info, R, dR, ddR, Δφ)
+    applies_to(t, info.type) || return e, g
+    Qt = _qhead(Q, m)
+    w = as_svector(energy_gradient(t, Qt, info)) * Δφ
+    return e + energy(t, Qt, info), g + J' * w
+end
+
+"Total number of contour integrals of a tuple of body terms."
+n_integrands(terms::Tuple, ::Type{T}) where {T} =
+    sum(t -> length(as_svector(contour_integrands(t, one(T), zero(T), zero(T)))), terms; init = 0)
+
+# Node-parallel variant of body_terms_kernel! (see KernelLayout). One work item
+# per (node k, body i), in workgroups of nθ × B bodies. Each work item stores
+# its integrands qⱼ(φₖ) in local memory; after the barrier every work item of
+# body i sums them to the same Qⱼ = Σₖ qⱼ(φₖ) Δφ and adds its own node's
+#   (GR, GD, GDD)[k, i] += Jₖᵀ w,  w = ∂F/∂Q · Δφ.
+# Node k = 1 adds the energy.
+#
+#   GR, GD, GDD  (in/out) nθ × N contour gradients (accumulated)
+#   E            (in/out) N, energy per body (accumulated)
+#   R, dR, ddR   nθ × N contour radius and its φ-derivatives at the nodes
+#   R0, type     N, radius scale and type
+#   terms        tuple of BodyTerms
+#   N            number of bodies (the ndrange is padded, see node_launch)
+#   Δφ           node spacing 2π/nθ
+#   nq           Val(total number of integrands), sizes the local buffer
+@kernel function body_terms_node_kernel!(GR, GD, GDD, E, @Const(R), @Const(dR), @Const(ddR),
+        @Const(R0), @Const(type), terms, N, Δφ, nq)
+    @uniform nθ = @groupsize()[1]
+    @uniform B = @groupsize()[2]
+    qbuf = @localmem eltype(GR) (nθ, B, _val(nq))
+    k, i = @index(Global, NTuple)
+    _, b = @index(Local, NTuple)
+    if i <= N
+        q = _node_integrands(terms, type[i], R[k, i], dR[k, i], ddR[k, i])
+        for c in 1:_val(nq)
+            qbuf[k, b, c] = q[c]
+        end
+    end
+    @synchronize
+    k, i = @index(Global, NTuple)
+    _, b = @index(Local, NTuple)
+    if i <= N
+        Q = _sum_nodes(qbuf, b, nθ, nq) * Δφ
+        info = BodyInfo(R0[i], type[i])
+        e, g = _node_gradients(terms, Q, info, R[k, i], dR[k, i], ddR[k, i], Δφ)
+        GR[k, i] += g[1]
+        GD[k, i] += g[2]
+        GDD[k, i] += g[3]
+        k == 1 && (E[i] += e)
+    end
+end
+
+_val(::Val{n}) where {n} = n
+
+# SVector of the node sums Σₖ buf[k, b, c] for c = 1:nq.
+@inline function _sum_nodes(buf, b, nθ, ::Val{nq}) where {nq}
+    return SVector(ntuple(Val(nq)) do c
+        s = zero(eltype(buf))
+        for k in 1:nθ
+            s += buf[k, b, c]
+        end
+        s
+    end)
+end
+
+function body_terms!(g::Gradients, terms::Tuple, geom::Geometry, bodies::Bodies, basis::FourierBasis,
+        layout::KernelLayout = BodyParallel())
     isempty(terms) && return g
     backend = get_backend(g.GR)
-    body_terms_kernel!(backend, WORKGROUP)(g.GR, g.GD, g.GDD, g.Ebody, geom.R, geom.dR,
-        geom.ddR, bodies.R0, bodies.type, terms, basis.nθ, basis.Δφ; ndrange = nbodies(bodies))
+    N = nbodies(bodies)
+    if uses_node_layout(layout, basis.nθ)
+        T = eltype(g.GR)
+        wg, nd = node_launch(basis.nθ, N)
+        body_terms_node_kernel!(backend, wg)(g.GR, g.GD, g.GDD, g.Ebody, geom.R, geom.dR,
+            geom.ddR, bodies.R0, bodies.type, terms, Int32(N), basis.Δφ,
+            Val(n_integrands(terms, T)); ndrange = nd)
+    else
+        body_terms_kernel!(backend, WORKGROUP)(g.GR, g.GD, g.GDD, g.Ebody, geom.R, geom.dR,
+            geom.ddR, bodies.R0, bodies.type, terms, basis.nθ, basis.Δφ; ndrange = N)
+    end
     return g
 end
 

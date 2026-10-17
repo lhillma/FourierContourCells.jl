@@ -1,6 +1,7 @@
 """
     Simulation(bodies, box; types, energies, bonds = (), dt = 0.005, nθ = 40,
-               backend = CPU(), T = Float64, seed = 1, rng = nothing, hook! = nothing)
+               backend = CPU(), T = Float64, seed = 1, rng = nothing, hook! = nothing,
+               layout = default_layout(backend))
 
 Complete simulation state. `bodies` (host or device [`Bodies`](@ref)) are
 converted to element type `T` and moved to the KernelAbstractions `backend`.
@@ -13,6 +14,9 @@ converted to element type `T` and moved to the KernelAbstractions `backend`.
 - `nθ`: number of contour quadrature nodes
 - `rng`: random number generator compatible with `backend`
   (default: `backend_rng(backend, seed)`)
+- `layout`: [`KernelLayout`](@ref) of the single-body term kernel
+  (`BodyParallel()` on the CPU, `NodeParallel()` on GPUs). Both give the same
+  results up to round-off.
 
 - `hook!`: optional function `hook!(sim)` called in every [`step!`](@ref)
   after the energy gradients `sim.grad` are computed and before the
@@ -26,7 +30,7 @@ of that type to have a parent with substrate drag.
 """
 mutable struct Simulation{T, Ba <: FourierBasis{T}, Bo <: Bodies, G <: Geometry,
         Gr <: Gradients, CL <: CellList, NL <: NeighborList, ChL <: ChildList, BL <: BondList, BT <: Tuple,
-        CT <: Tuple, BoT <: Tuple, TT <: Tuple, R, Mat, H}
+        CT <: Tuple, BoT <: Tuple, TT <: Tuple, R, Mat, H, L <: KernelLayout}
     const basis::Ba
     const box::PeriodicBox{T}
     const bodies::Bo
@@ -44,6 +48,7 @@ mutable struct Simulation{T, Ba <: FourierBasis{T}, Bo <: Bodies, G <: Geometry,
     const noise::Mat
     const disp::Mat
     const hook::H
+    const layout::L
     dt::T
     t::T
     step::Int
@@ -51,7 +56,7 @@ end
 
 function Simulation(bodies::Bodies, box::PeriodicBox; types, energies = (), bonds = (), dt = 0.005,
         nθ::Integer = 40, backend = CPU(), T::Type = Float64, seed = 1, rng = nothing,
-        hook! = nothing)
+        hook! = nothing, layout::KernelLayout = default_layout(backend))
     types = map(BodyType{T}, Tuple(types))
     energies = Tuple(energies)
     body_terms = filter(is_body_term, energies)
@@ -82,7 +87,7 @@ function Simulation(bodies::Bodies, box::PeriodicBox; types, energies = (), bond
     children = ChildList(host.parent; backend)
     bondlist = BondList(bonds, nbodies(host); backend)
     sim = Simulation(basis, box, dev, Geometry(basis, dev), Gradients(basis, dev), cells, neighbors,
-        children, bondlist, body_terms, contact_terms, bond_terms, types, rng, noise, disp, hook!,
+        children, bondlist, body_terms, contact_terms, bond_terms, types, rng, noise, disp, hook!, layout,
         T(dt), zero(T), 0)
     enforce_shape!(dev, basis)
     update_geometry!(sim.geom, basis, dev)
@@ -131,7 +136,7 @@ Requires up-to-date geometry and neighbour lists (see [`update_neighbors!`](@ref
 function compute_gradients!(sim::Simulation)
     (; basis, box, bodies, geom, grad, neighbors) = sim
     reset!(grad)
-    body_terms!(grad, sim.body_terms, geom, bodies, basis)
+    body_terms!(grad, sim.body_terms, geom, bodies, basis, sim.layout)
     if !isempty(sim.contact_terms)
         contact_pressure!(grad.P, sim.contact_terms, geom, bodies, neighbors, box, basis)
         contact_gradient!(grad, geom, basis)

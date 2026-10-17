@@ -28,5 +28,6 @@ end
     include("test_contact.jl")
     include("test_dynamics.jl")
     include("test_parents.jl")
+    include("test_layout.jl")
     include("test_enzyme.jl")
 end

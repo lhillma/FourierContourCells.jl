@@ -60,12 +60,13 @@ public contour_integrands, energy, contour_integrand_gradients, energy_gradient,
 # built-in energy terms
 export Tension, PerimeterElasticity, Overlap, LinearRepulsion, HarmonicBond
 # simulation
-export Simulation, step!, run!, compute_gradients!, hexagonal_monolayer, with_nuclei, parent_bonds, CPU
+export Simulation, step!, run!, compute_gradients!, hexagonal_monolayer, with_nuclei, parent_bonds, CPU,
+    KernelLayout, BodyParallel, NodeParallel
 # observables
 export perimeters, areas, shape_index, positions, unwrapped_positions, contours, body_energy,
     protrusion
 # helpers for user kernels and diagnostics (public, not exported)
-public minimum_image, contour_radius, node_angle, to_host, to_backend
+public minimum_image, contour_radius, node_angle, to_host, to_backend, default_layout
 # visualisation (Makie extension)
 export cellview!, update_view!, cellplot
 # public API with generic names, not exported: call them qualified,
