@@ -198,6 +198,59 @@ ad_energy_gradient(::EnzymeAD, args...) = enzyme_missing()
 ad_bond_gradient(::EnzymeAD, args...) = enzyme_missing()
 enzyme_missing() = error("EnzymeAD requires `using Enzyme` to load the Enzyme extension")
 
+## Precision of term parameters
+
+"""
+    convert_precision(T, term) -> term
+
+Copy of an energy term with its floating-point parameters converted to `T`,
+so that kernels of a `Simulation{T}` do not silently compute in another
+precision (e.g. `Tension(0.01)` in Float64 slows Float32 GPU kernels down by
+a third). [`Simulation`](@ref) applies it to all energy terms.
+
+The default rebuilds the term from its fields with the type's default
+constructor, converting floats, static arrays of floats, tuples and nested
+structs (such as the wrapped term of [`OnTypes`](@ref)); integers and other
+values are kept. Terms whose constructor does not accept its fields in
+order are left unchanged with a warning: define a method for them, e.g.
+
+    FourierContourCells.convert_precision(::Type{T}, t::MyTerm) where {T} = MyTerm{T}(t.a, t.b)
+"""
+function convert_precision(::Type{T}, term::EnergyTerm) where {T <: AbstractFloat}
+    _has_precision(T, term) && return term
+    return try
+        _retype(T, term)
+    catch err
+        err isa MethodError || rethrow()
+        @warn "Could not convert the parameters of $(typeof(term)) to $T; define " *
+              "`FourierContourCells.convert_precision(::Type{T}, ::$(nameof(typeof(term))))` to do so" maxlog = 1
+        term
+    end
+end
+
+# Whether all floats in x (recursively through fields) are of type T.
+_has_precision(::Type{T}, x::AbstractFloat) where {T} = x isa T
+_has_precision(::Type{T}, x::Union{Tuple, NamedTuple}) where {T} = all(y -> _has_precision(T, y), x)
+_has_precision(::Type{T}, x::StaticArray{S, <:AbstractFloat}) where {T, S} = eltype(x) == T
+_has_precision(::Type, x::Union{AbstractArray, Integer, Symbol, Nothing, Type, Function}) = true
+function _has_precision(::Type{T}, x) where {T}
+    S = typeof(x)
+    (isstructtype(S) && fieldcount(S) > 0) || return true
+    return all(f -> _has_precision(T, getfield(x, f)), 1:fieldcount(S))
+end
+
+_retype(::Type{T}, x::AbstractFloat) where {T} = T(x)
+_retype(::Type, x::Union{Integer, Symbol, Nothing, Type, Function}) = x
+_retype(::Type{T}, x::Union{Tuple, NamedTuple}) where {T} = map(y -> _retype(T, y), x)
+_retype(::Type{T}, x::StaticArray{S, <:AbstractFloat}) where {T, S} = similar_type(x, T)(x)
+_retype(::Type, x::AbstractArray) = x
+function _retype(::Type{T}, x) where {T}
+    S = typeof(x)
+    (isstructtype(S) && fieldcount(S) > 0) || return x
+    fields = ntuple(f -> _retype(T, getfield(x, f)), fieldcount(S))
+    return Base.typename(S).wrapper(fields...)
+end
+
 ## Normalisation of user return values
 
 @inline as_svector(x::Number) = SVector(x)

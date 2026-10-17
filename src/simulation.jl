@@ -9,6 +9,8 @@ converted to element type `T` and moved to the KernelAbstractions `backend`.
 - `types`: tuple of [`BodyType`](@ref), indexed by `bodies.type`
 - `energies`: tuple of [`BodyTerm`](@ref)s, [`ContactTerm`](@ref)s and
   [`BondTerm`](@ref)s
+- `T`: floating-point precision of the state; the parameters of `types` and
+  `energies` are converted to it (see [`convert_precision`](@ref))
 - `bonds`: pairs `(i, j)` of bonded bodies, on which the bond terms act
   (e.g. [`parent_bonds`](@ref)`(bodies)`)
 - `nθ`: number of contour quadrature nodes
@@ -64,11 +66,12 @@ function Simulation(bodies::Bodies, box::PeriodicBox; types, energies = (), bond
         hook! = nothing, layout::KernelLayout = default_layout(backend))
     types = map(BodyType{T}, Tuple(types))
     energies = Tuple(energies)
+    all(t -> is_body_term(t) || is_contact_term(t) || is_bond_term(t), energies) ||
+        throw(ArgumentError("energy terms must be BodyTerms, ContactTerms or BondTerms"))
+    energies = map(t -> convert_precision(T, t), energies)
     body_terms = filter(is_body_term, energies)
     contact_terms = filter(is_contact_term, energies)
     bond_terms = filter(is_bond_term, energies)
-    length(body_terms) + length(contact_terms) + length(bond_terms) == length(energies) ||
-        throw(ArgumentError("energy terms must be BodyTerms, ContactTerms or BondTerms"))
 
     host = to_host(bodies)
     maximum(host.type) <= length(types) || throw(ArgumentError("body type without BodyType entry"))

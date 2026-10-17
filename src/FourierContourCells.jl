@@ -30,7 +30,7 @@ using KernelAbstractions
 using KernelAbstractions: @kernel, @index, @Const, get_backend, CPU
 using LinearAlgebra: mul!
 using Random: Random
-using StaticArrays: SVector, SMatrix
+using StaticArrays: SVector, SMatrix, StaticArray, similar_type
 import ForwardDiff
 
 include("utils.jl")
@@ -57,7 +57,7 @@ export FourierBasis, PeriodicBox, Bodies, BodyType, nbodies, ncoef, nmodes
 # not exported (generic names), e.g. `FourierContourCells.energy(t::MyTerm, Q, b) = ...`
 export EnergyTerm, BodyTerm, ContactTerm, BondTerm, BodyInfo, OnTypes, ForwardDiffAD, EnzymeAD
 public contour_integrands, energy, contour_integrand_gradients, energy_gradient, pressure,
-    interaction_range, applies_to, ad_backend, bond_energy, bond_gradient
+    interaction_range, applies_to, ad_backend, bond_energy, bond_gradient, convert_precision
 # built-in energy terms
 export Tension, PerimeterElasticity, Overlap, LinearRepulsion, HarmonicBond
 # simulation
