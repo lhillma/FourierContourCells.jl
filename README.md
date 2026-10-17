@@ -198,8 +198,20 @@ Deviations from the reference code, both deliberate:
 
 ## Performance
 
-N = 1024 at packing 0.95, Float64: 4.7 ms/step on one thread (reference C++
-12.0 ms/step), 1.6 ms/step with 8 threads.
+Soft fluid (`Tension` + `Overlap`) at packing 0.95, `examples/benchmark.jl`:
+
+| N | backend | precision | ms/step |
+|---:|:---|:---|---:|
+| 1024 | CPU, 1 thread | Float64 | 3.8 (reference C++: 12.0) |
+| 1024 | CPU, 8 threads | Float64 | 1.5 |
+| 1024 | RTX A2000 Laptop GPU | Float32 | 0.17 |
+| 16384 | RTX A2000 Laptop GPU | Float32 | 1.4 |
+
+On GPUs, per-node work runs one work item per (contour node, body)
+(`layout = NodeParallel()`, the GPU default); the neighbour list is rebuilt only when
+bodies have drifted by more than half the Verlet `skin`. Consumer GPUs are
+slow in Float64 (≈10× here), so use `T = Float32` there and compare with CPU
+runs statistically.
 
 ## Layout
 
@@ -209,8 +221,9 @@ src/
   bodies.jl         body state (structure of arrays), BodyType, parent → children table
   geometry.jl       lab-frame rotation, contour synthesis, R(ψ) off-grid
   energies/         interface (+ AD), body, contact and bond terms & kernels
-  gradients.jl      contour gradients → (r, θ, aₙ, bₙ)
-  neighbors.jl      cell list and per-body neighbour list
+  gradients.jl      contour gradients → (r, θ, aₙ, bₙ), body- or node-parallel kernels
+  neighbors.jl      cell list and per-body neighbour list with Verlet skin
+  random.jl         counter-based Philox noise (same on CPU and GPU)
   dynamics.jl       displacements (substrate / parent drag), Euler–Maruyama, shape constraints
   simulation.jl     Simulation, step!, run!
 ext/                Makie (visualisation) and Enzyme extensions
