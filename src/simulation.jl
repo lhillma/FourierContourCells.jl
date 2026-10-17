@@ -1,6 +1,6 @@
 """
     Simulation(bodies, box; types, energies, bonds = (), dt = 0.005, nθ = 40,
-               backend = CPU(), T = Float64, seed = 1, hook! = nothing,
+               backend = CPU(), T = Float64, seed = 1, skin = 0.3, hook! = nothing,
                layout = default_layout(backend))
 
 Complete simulation state. `bodies` (host or device [`Bodies`](@ref)) are
@@ -12,6 +12,10 @@ converted to element type `T` and moved to the KernelAbstractions `backend`.
 - `bonds`: pairs `(i, j)` of bonded bodies, on which the bond terms act
   (e.g. [`parent_bonds`](@ref)`(bodies)`)
 - `nθ`: number of contour quadrature nodes
+- `skin`: Verlet skin of the neighbour list (length). The list is rebuilt
+  only when a body has drifted (moved, or grown its contour bound) by more
+  than skin/2 since the last build; `skin = 0` rebuilds every step. Larger
+  skins mean fewer rebuilds but longer neighbour lists.
 - `seed`: key of the counter-based Philox random numbers. The noise of body
   `i` in step `n` depends only on (seed, i, n), so it is the same on every
   backend and independent of the number of threads.
@@ -56,7 +60,7 @@ mutable struct Simulation{T, Ba <: FourierBasis{T}, Bo <: Bodies, G <: Geometry,
 end
 
 function Simulation(bodies::Bodies, box::PeriodicBox; types, energies = (), bonds = (), dt = 0.005,
-        nθ::Integer = 40, backend = CPU(), T::Type = Float64, seed::Integer = 1,
+        nθ::Integer = 40, backend = CPU(), T::Type = Float64, seed::Integer = 1, skin::Real = 0.3,
         hook! = nothing, layout::KernelLayout = default_layout(backend))
     types = map(BodyType{T}, Tuple(types))
     energies = Tuple(energies)
@@ -78,12 +82,12 @@ function Simulation(bodies::Bodies, box::PeriodicBox; types, energies = (), bond
     box = PeriodicBox{T}(box)
 
     # Largest possible extent of a body under the shape bound, plus range of contact terms
-    cutoff = 2 * maximum(host.R0) * (1 + SHAPE_BOUND) + contact_range(contact_terms)
+    cutoff = 2 * maximum(host.R0) * (1 + SHAPE_BOUND) + contact_range(contact_terms) + skin
     cells = CellList(box, cutoff, nbodies(dev); backend)
     noise = KernelAbstractions.zeros(backend, T, 3, nbodies(dev))
     disp = KernelAbstractions.zeros(backend, T, 2, nbodies(dev))
 
-    neighbors = NeighborList(nbodies(dev); backend)
+    neighbors = NeighborList(nbodies(dev), T; skin, backend)
     children = ChildList(host.parent; backend)
     bondlist = BondList(bonds, nbodies(host); backend)
     sim = Simulation(basis, box, dev, Geometry(basis, dev), Gradients(basis, dev), cells, neighbors,
@@ -113,14 +117,17 @@ _convert_eltype(::Type, A::AbstractArray) = A
 nbodies(sim::Simulation) = nbodies(sim.bodies)
 
 """
-    update_neighbors!(sim)
+    update_neighbors!(sim; force = false)
 
-Rebuild the cell list and the per-body neighbour list for the current state.
+Rebuild the cell list and the per-body neighbour list if the Verlet skin no
+longer covers the current state (see `skin` in [`Simulation`](@ref)), or
+always with `force = true`. Requires up-to-date geometry.
 """
-function update_neighbors!(sim::Simulation)
+function update_neighbors!(sim::Simulation; force::Bool = false)
+    nl = sim.neighbors
+    force || needs_rebuild(nl, sim.bodies, sim.geom.rmax, sim.box) || return sim
     update_celllist!(sim.cells, sim.bodies)
-    update_neighbors!(sim.neighbors, sim.cells, sim.bodies, sim.geom.rmax, sim.box,
-        contact_range(sim.contact_terms))
+    update_neighbors!(nl, sim.cells, sim.bodies, sim.geom.rmax, sim.box, contact_range(sim.contact_terms))
     return sim
 end
 

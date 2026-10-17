@@ -9,7 +9,7 @@ using Test
 function refresh!(sim)
     FourierContourCells.enforce_shape!(sim.bodies, sim.basis)
     FourierContourCells.update_geometry!(sim.geom, sim.basis, sim.bodies)
-    FourierContourCells.update_neighbors!(sim)
+    FourierContourCells.update_neighbors!(sim; force = true)
     compute_gradients!(sim)
     return sim
 end
