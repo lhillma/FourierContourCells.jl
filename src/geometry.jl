@@ -64,25 +64,31 @@ end
 @kernel function lab_frame_kernel!(lab, labR0, rmax, @Const(coef), @Const(θ), @Const(R0), K)
     @inbounds begin
         i = @index(Global)
-        r0 = R0[i]
-        lab[1, i] = coef[1, i]
-        labR0[1, i] = r0 * coef[1, i]
-        bound = coef[1, i]
-        for m in 1:K
-            n = m + 1
-            a = coef[1 + m, i]
-            b = coef[1 + K + m, i]
-            s, c = sincos(n * θ[i])
-            α = a * c - b * s
-            β = a * s + b * c
-            lab[1 + m, i] = α
-            lab[1 + K + m, i] = β
-            labR0[1 + m, i] = r0 * α
-            labR0[1 + K + m, i] = r0 * β
-            bound += sqrt(a^2 + b^2)
-        end
-        rmax[i] = r0 * bound
+        lab_frame!(lab, labR0, rmax, coef, θ[i], R0[i], i, K)
     end
+end
+
+# The work of lab_frame_kernel! for body i with orientation θi and radius
+# scale r0 (shared with the fused update kernel, see euler_maruyama_kernel!).
+Base.@propagate_inbounds function lab_frame!(lab, labR0, rmax, coef, θi, r0, i, K)
+    lab[1, i] = coef[1, i]
+    labR0[1, i] = r0 * coef[1, i]
+    bound = coef[1, i]
+    for m in 1:K
+        n = m + 1
+        a = coef[1 + m, i]
+        b = coef[1 + K + m, i]
+        s, c = sincos(n * θi)
+        α = a * c - b * s
+        β = a * s + b * c
+        lab[1 + m, i] = α
+        lab[1 + K + m, i] = β
+        labR0[1 + m, i] = r0 * α
+        labR0[1 + K + m, i] = r0 * β
+        bound += sqrt(a^2 + b^2)
+    end
+    rmax[i] = r0 * bound
+    return nothing
 end
 
 "Views of the three `nθ`-row blocks of a `3nθ × N` matrix."
@@ -100,7 +106,12 @@ function update_geometry!(geom::Geometry, basis::FourierBasis, bodies::Bodies)
     backend = get_backend(bodies.x)
     lab_frame_kernel!(backend, WORKGROUP)(geom.lab, geom.labR0, geom.rmax, bodies.coef, bodies.θ,
         bodies.R0, nmodes(basis); ndrange = nbodies(bodies))
-    if stacked_products(backend)
+    return synthesize!(geom, basis)
+end
+
+"Contours from the lab-frame coefficients in `geom` (second half of [`update_geometry!`](@ref))."
+function synthesize!(geom::Geometry, basis::FourierBasis)
+    if stacked_products(get_backend(geom.Rall))
         matmul!(geom.Rall, basis.S, geom.labR0)
     else
         mul!(geom.R, basis.C, geom.labR0)

@@ -187,12 +187,23 @@ end
         @Const(y0), @Const(rmax0), Lx, Ly, skin)
     @inbounds begin
         i = @index(Global)
-        dx = minimum_image(x[i] - x0[i], Lx)
-        dy = minimum_image(y[i] - y0[i], Ly)
-        δ = sqrt(dx^2 + dy^2) + max(zero(dx), rmax[i] - rmax0[i])
-        2δ > skin && (status[STATUS_REBUILD] = Int32(1))
+        skin_flag!(status, (x0, y0, rmax0, skin), x[i], y[i], rmax[i], i, Lx, Ly)
     end
 end
+
+# The skin check of body i at the new position (x, y) and bound rmax, with
+# skin = (x0, y0, rmax0, skin) (shared with the fused update kernel).
+Base.@propagate_inbounds function skin_flag!(status, skin, x, y, rmax, i, Lx, Ly)
+    x0, y0, rmax0, s = skin
+    dx = minimum_image(x - x0[i], Lx)
+    dy = minimum_image(y - y0[i], Ly)
+    δ = sqrt(dx^2 + dy^2) + max(zero(dx), rmax - rmax0[i])
+    2δ > s && (status[STATUS_REBUILD] = Int32(1))
+    return nothing
+end
+
+"Arguments of the skin check for the fused update kernel (`nothing`: no check)."
+skin_args(nl::NeighborList) = (nl.valid && nl.skin > 0) ? (nl.x0, nl.y0, nl.rmax0, nl.skin) : nothing
 
 "Raise the rebuild flag in `status` if the Verlet skin of `nl` is exceeded (no host sync)."
 function skin_check!(status, nl::NeighborList, bodies::Bodies, rmax, box::PeriodicBox)

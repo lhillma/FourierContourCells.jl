@@ -66,6 +66,39 @@ step number), from two Philox blocks with counters (i, n_lo, n_hi, 0|1).
     return (z1, z2, z3, z4)
 end
 
+"""
+    philox_pair(T, key, i, n, block) -> (z₁, z₂)
+
+Two standard normals of body `i` in draw `n` from Philox block `block`
+(0 or 1); `philox_normals` returns the pairs of blocks 0 and 1.
+"""
+@inline function philox_pair(::Type{T}, key::NTuple{2, UInt32}, i, n, block) where {T}
+    a = philox4x32((i % UInt32, n % UInt32, (n >> 32) % UInt32, block % UInt32), key)
+    return box_muller(uniform_open(T, a[1], a[2]), uniform_open(T, a[3], a[4]))
+end
+
+"""
+    PhiloxNoise(key, clock)
+
+Noise source for kernels: the standard normals of body i in the current step
+are generated on the fly (no noise array), with the draw index read from the
+device step counter `clock` (or an integer). ξ₁, ξ₂ (translation) are block 0
+and ξ₃ (orientation) the first number of block 1, as in `noise_kernel!`.
+"""
+struct PhiloxNoise{C}
+    key::NTuple{2, UInt32}
+    clock::C
+end
+Adapt.@adapt_structure PhiloxNoise
+
+# Noise of body i in kernels: from a 3 × N matrix, or generated (PhiloxNoise).
+Base.@propagate_inbounds noise_xy(ξ::AbstractMatrix, ::Type, i) = (ξ[1, i], ξ[2, i])
+Base.@propagate_inbounds noise_θ(ξ::AbstractMatrix, ::Type, i) = ξ[3, i]
+Base.@propagate_inbounds noise_xy(ξ::PhiloxNoise, ::Type{T}, i) where {T} =
+    philox_pair(T, ξ.key, i, draw_index(ξ.clock), 0)
+Base.@propagate_inbounds noise_θ(ξ::PhiloxNoise, ::Type{T}, i) where {T} =
+    philox_pair(T, ξ.key, i, draw_index(ξ.clock), 1)[1]
+
 "Philox key (two 32-bit words) from an integer seed."
 philox_key(seed::Integer) = ((UInt64(seed) % UInt32), ((UInt64(seed) >> 32) % UInt32))
 

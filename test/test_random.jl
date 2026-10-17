@@ -33,6 +33,16 @@ using FourierContourCells: philox4x32, philox_key, philox_noise!, philox_normals
         @test all(isfinite, ξ)
     end
 
+    @testset "noise generated in kernels matches the noise array" begin
+        key, n = philox_key(5), 17
+        ξ = philox_noise!(zeros(Float32, 3, 50), key, n)
+        src = FourierContourCells.PhiloxNoise(key, [Int64(n)])
+        for i in (1, 7, 50)
+            @test FourierContourCells.noise_xy(src, Float32, i) == (ξ[1, i], ξ[2, i])
+            @test FourierContourCells.noise_θ(src, Float32, i) == ξ[3, i]
+        end
+    end
+
     @testset "draw index uses all 64 bits" begin
         key = philox_key(1)
         @test philox_normals(Float64, key, 1, 1) != philox_normals(Float64, key, 1, 1 + (1 << 32))

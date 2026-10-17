@@ -52,7 +52,6 @@ mutable struct Simulation{T, Ba <: FourierBasis{T}, Bo <: Bodies, G <: Geometry,
     const bond_terms::BoT
     const types::TT
     const key::NTuple{2, UInt32}
-    const noise::Mat
     const disp::Mat
     const hook::H
     const layout::L
@@ -90,14 +89,13 @@ function Simulation(bodies::Bodies, box::PeriodicBox; types, energies = (), bond
     # Largest possible extent of a body under the shape bound, plus range of contact terms
     cutoff = 2 * maximum(host.R0) * (1 + SHAPE_BOUND) + contact_range(contact_terms) + skin
     cells = CellList(box, cutoff, nbodies(dev); backend)
-    noise = KernelAbstractions.zeros(backend, T, 3, nbodies(dev))
-    disp = KernelAbstractions.zeros(backend, T, 2, nbodies(dev))
+    disp = KernelAbstractions.zeros(backend, T, 3, nbodies(dev))
 
     neighbors = NeighborList(nbodies(dev), T; skin, backend)
     children = ChildList(host.parent; backend)
     bondlist = BondList(bonds, nbodies(host); backend)
     sim = Simulation(basis, box, dev, Geometry(basis, dev), Gradients(basis, dev), cells, neighbors,
-        children, bondlist, body_terms, contact_terms, bond_terms, types, philox_key(seed), noise, disp, hook!, layout,
+        children, bondlist, body_terms, contact_terms, bond_terms, types, philox_key(seed), disp, hook!, layout,
         KernelAbstractions.zeros(backend, Int32, STATUS_LENGTH), KernelAbstractions.zeros(backend, Int64, 1),
         Ref{Any}(nothing),
         T(dt), zero(T), 0)
@@ -149,15 +147,13 @@ end
 Evaluate ∂E/∂(r, θ, aₙ, bₙ) of all energy terms for the current state.
 Requires up-to-date geometry and neighbour lists (see [`update_neighbors!`](@ref)).
 """
-function compute_gradients!(sim::Simulation)
+function compute_gradients!(sim::Simulation; frame::Bool = true, status = nothing)
     (; basis, box, bodies, geom, grad, neighbors) = sim
-    status = sim.status
-    reset!(grad; status)
-    body_terms!(grad, sim.body_terms, geom, bodies, basis, sim.layout; status)
+    body_terms!(grad, sim.body_terms, geom, bodies, basis, sim.layout; status)  # initialises grad
     isempty(sim.contact_terms) ||
         contact_gradients!(grad, sim.contact_terms, geom, bodies, neighbors, box, basis; status)
     bond_gradient!(grad, sim.bond_terms, bodies, sim.bonds, box; status)
-    pullback!(grad, geom, bodies, basis)
+    pullback!(grad, geom, bodies, basis; frame)
     return grad
 end
 
@@ -176,16 +172,21 @@ function step!(sim::Simulation, n::Integer = 1)
     return sim
 end
 
-# One step after the neighbour list update: gradients, hook, noise (draw index
-# from the device clock), integration and geometry. Only device operations
-# apart from the hook.
+# One step after the neighbour list update: gradients, hook, integration and
+# geometry. Only device operations apart from the hook. Per-body work is
+# fused into the integration kernels (see euler_maruyama_kernel!): noise
+# generated on the fly (draw index from the device clock), the body-frame
+# gradient (unless a hook may modify sim.grad first), the lab-frame geometry
+# and the Verlet skin check, which raises the rebuild flag for the next step.
 function advance!(sim::Simulation)
-    compute_gradients!(sim)
-    sim.hook === nothing || sim.hook(sim)
-    philox_noise!(sim.noise, sim.key, sim.clock; status = sim.status)
-    integrate!(sim.bodies, sim.grad, sim.disp, sim.noise, sim.children, sim.types, sim.dt,
-        sim.box, sim.basis; clock = sim.clock, status = sim.status)
-    update_geometry!(sim.geom, sim.basis, sim.bodies)
+    hooked = sim.hook !== nothing
+    compute_gradients!(sim; frame = hooked, status = sim.status)
+    hooked && sim.hook(sim)
+    skin = isempty(sim.contact_terms) ? nothing : skin_args(sim.neighbors)
+    integrate!(sim.bodies, sim.grad, sim.disp, PhiloxNoise(sim.key, sim.clock), sim.children,
+        sim.types, sim.dt, sim.box, sim.basis; geom = sim.geom, skin, frame = !hooked,
+        clock = sim.clock, status = sim.status)
+    synthesize!(sim.geom, sim.basis)
     return sim
 end
 
@@ -193,17 +194,13 @@ end
     device_step!(sim)
 
 One step without host synchronisation, for capture in a CUDA graph: the skin
-check only raises the rebuild flag in `sim.status`, which freezes this and all
-following steps (see `isactive`) until the host rebuilds the neighbour list.
+check (fused into the update of the previous step) only raises the rebuild
+flag in `sim.status`, which freezes this and all following steps (see
+`isactive`) until the host rebuilds the neighbour list.
 Requires a valid neighbour list with `skin > 0` and no hook; `sim.t` and
 `sim.step` are not updated (the device clock is).
 """
-function device_step!(sim::Simulation)
-    isempty(sim.contact_terms) ||
-        skin_check!(sim.status, sim.neighbors, sim.bodies, sim.geom.rmax, sim.box)
-    advance!(sim)
-    return sim
-end
+device_step!(sim::Simulation) = advance!(sim)
 
 "Whether `sim` can run in graph mode (see [`run!`](@ref))."
 graph_capable(sim::Simulation) =

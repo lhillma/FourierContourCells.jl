@@ -32,6 +32,7 @@ using LinearAlgebra: mul!
 using Random: Random
 using StaticArrays: SVector, SMatrix, StaticArray, similar_type
 import ForwardDiff
+import Adapt
 
 include("utils.jl")
 include("random.jl")

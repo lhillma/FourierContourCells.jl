@@ -112,7 +112,8 @@ function run_steps!(::CUDABackend, sim::Simulation, n::Integer)
         sim.step += executed
         done += executed
         since_rebuild += executed
-        if status[STATUS_REBUILD] != 0
+        # a flag raised by the last step is left for the next step (as in step!)
+        if status[STATUS_REBUILD] != 0 && done < n
             update_neighbors!(sim)  # sees the raised flag: rebuilds and clears it
             g.interval = (g.interval + since_rebuild) / 2
             since_rebuild = 0

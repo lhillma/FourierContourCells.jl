@@ -54,10 +54,21 @@ uses_node_layout(::BodyParallel, nθ) = false
 # graph run many steps and stop at the first one that needs a rebuild. Kernels
 # also accept `status = nothing` (never frozen). `clock[1]` counts the steps
 # on the device and is the Philox draw index of the noise.
+#
+# The update kernel raises STATUS_REBUILD itself (fused skin check), so it must
+# not read that entry: other work items of the same launch would see the flag
+# of this step. It checks STATUS_UPDATE instead, a copy of STATUS_REBUILD made
+# by the displacement kernel that precedes it.
 const STATUS_REBUILD = 1
-const STATUS_LENGTH = 2  # entry 2 reserved (neighbour list overflow, see notes)
-@inline isactive(::Nothing) = true
-Base.@propagate_inbounds isactive(status::AbstractVector) = status[STATUS_REBUILD] == 0
+const STATUS_UPDATE = 2
+const STATUS_LENGTH = 3  # entry 3 reserved (neighbour list overflow, see notes)
+@inline isactive(::Nothing, entry = STATUS_REBUILD) = true
+Base.@propagate_inbounds isactive(status::AbstractVector, entry = STATUS_REBUILD) = status[entry] == 0
+@inline mirror_status!(::Nothing, i) = nothing
+Base.@propagate_inbounds function mirror_status!(status::AbstractVector, i)
+    i == 1 && (status[STATUS_UPDATE] = status[STATUS_REBUILD])
+    return nothing
+end
 @inline draw_index(n::Integer) = n % UInt64
 Base.@propagate_inbounds draw_index(clock::AbstractVector) = clock[1] % UInt64
 @inline tick!(::Nothing, i) = nothing

@@ -40,7 +40,7 @@ if CUDA.functional()
 
         @testset "graph mode" begin
             state(s) = map(Array, (s.bodies.x, s.bodies.y, s.bodies.θ, s.bodies.coef, s.bodies.imgx,
-                s.grad.gcoef, s.grad.gx, s.noise))
+                s.grad.gcoef, s.grad.gx, s.disp))
             same(a, b) = state(a) == state(b) && a.t == b.t && a.step == b.step &&
                 a.neighbors.builds == b.neighbors.builds
             # fast cells and a thin skin: many rebuilds, frozen chunks

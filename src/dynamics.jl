@@ -94,11 +94,12 @@ Base.@propagate_inbounds function substrate_displacement(i, θ, type, gx, gy, ξ
     end
     s, c = sincos(θ[i])
     σt = sqrt(2 * p.Dt * dt)
-    return dt * (p.v0 * c - p.μr * fx) + σt * ξ[1, i], dt * (p.v0 * s - p.μr * fy) + σt * ξ[2, i]
+    ξ1, ξ2 = noise_xy(ξ, typeof(dt), i)
+    return dt * (p.v0 * c - p.μr * fx) + σt * ξ1, dt * (p.v0 * s - p.μr * fy) + σt * ξ2
 end
 
-# Translational displacement of every body in one Euler–Maruyama step. One
-# work item per body i, with p = types[type[i]].
+# Translational displacement and orientation noise of every body in one
+# Euler–Maruyama step. One work item per body i, with p = types[type[i]].
 #
 # Substrate drag (p.parent_drag false): see `substrate_displacement`.
 # Parent drag: body i with parent c feels drag ζ_i = 1/μr_i against the
@@ -109,18 +110,24 @@ end
 #   ṙ_c = v0_c e(θ_c) + μr_c (F_c + Σ_children F_k),   ṙ_k = ṙ_c + v0_k e(θ_k) + μr_k F_k,
 # so internal forces between parent and child (e.g. a bond) cancel in the
 # parent's motion. A child repeats its parent's computation (same ξ, θ, ∂E/∂r)
-# and adds its own relative displacement and noise.
+# and adds its own relative displacement and noise. Row 3 gets the
+# orientation noise √(2 Dr dt) ξ₃, so that the update kernel needs no noise.
+# (Displacement and update stay separate kernels: a child reads its parent's
+# θ before the update.)
 #
-#   dx, dy       (out) N, displacements
+#   disp         (out) 3 × N, (Δx, Δy, √(2 Dr dt) ξ₃) per body
 #   θ, type      N, orientations (before the update) and body types
 #   parent       N, parent ids
 #   gx, gy       N, ∂E/∂x, ∂E/∂y
-#   ξ            3 × N standard normal random numbers (rows 1, 2 used)
+#   ξ            noise: a 3 × N matrix of standard normals, or PhiloxNoise
 #   cidx, ccount children of each body (see ChildList)
 #   types        tuple of BodyType;  dt: time step
-#   status       run status; nothing is done while it is frozen (see isactive)
-@kernel function displacement_kernel!(dx, dy, @Const(θ), @Const(type), @Const(parent), @Const(gx),
-        @Const(gy), @Const(ξ), @Const(cidx), @Const(ccount), types, dt, status)
+#   status       run status; nothing is done while it is frozen (see isactive).
+#                Work item 1 copies the rebuild flag to STATUS_UPDATE for the
+#                update kernel.
+@kernel function displacement_kernel!(disp, @Const(θ), @Const(type), @Const(parent), @Const(gx),
+        @Const(gy), ξ, @Const(cidx), @Const(ccount), types, dt, status)
+    @inbounds mirror_status!(status, @index(Global))
     @inbounds if isactive(status)
         i = @index(Global)
         p = types[type[i]]
@@ -129,76 +136,97 @@ end
             ux, uy = substrate_displacement(c, θ, type, gx, gy, ξ, cidx, ccount, types, dt)
             s, co = sincos(θ[i])
             σt = sqrt(2 * p.Dt * dt)
-            dx[i] = ux + dt * (p.v0 * co - p.μr * gx[i]) + σt * ξ[1, i]
-            dy[i] = uy + dt * (p.v0 * s - p.μr * gy[i]) + σt * ξ[2, i]
+            ξ1, ξ2 = noise_xy(ξ, typeof(dt), i)
+            disp[1, i] = ux + dt * (p.v0 * co - p.μr * gx[i]) + σt * ξ1
+            disp[2, i] = uy + dt * (p.v0 * s - p.μr * gy[i]) + σt * ξ2
         else
-            dx[i], dy[i] = substrate_displacement(i, θ, type, gx, gy, ξ, cidx, ccount, types, dt)
+            disp[1, i], disp[2, i] = substrate_displacement(i, θ, type, gx, gy, ξ, cidx, ccount, types, dt)
         end
+        disp[3, i] = sqrt(2 * p.Dr * dt) * noise_θ(ξ, typeof(dt), i)
     end
 end
 
-# One Euler–Maruyama step for every body. One work item per body i.
+# Euler–Maruyama update of every body, fused with the per-body work around it.
+# One work item per body i, with p = types[type[i]]:
 #
-# With p = types[type[i]] the parameters of body i's type and ξ standard normal
-# numbers, the update reads
-#   r  ← r + Δr   (translational displacement from displacement_kernel!)
-#   θ  ← θ - dt μθ ∂E/∂θ + √(2 Dr dt) ξ₃
-#   aₙ ← aₙ - dt μab ∂E/∂aₙ,  bₙ ← bₙ - dt μab ∂E/∂bₙ
-# Afterwards the shape constraints are enforced and the position is wrapped
-# into the box, counting crossed periods in the image counters.
+# 1. If `frame`: the body-frame gradient gcoef from glab (see body_frame!; it
+#    uses coef and θ before the update) and stores it in gcoef. Otherwise
+#    gcoef must be current (e.g. from compute_gradients! before a hook).
+# 2. The update
+#      r  ← r + Δr   (translational displacement from displacement_kernel!)
+#      θ  ← θ - dt μθ ∂E/∂θ + √(2 Dr dt) ξ₃
+#      aₙ ← aₙ - dt μab ∂E/∂aₙ,  bₙ ← bₙ - dt μab ∂E/∂bₙ
+#    then the shape constraints, and wrapping of the position into the box
+#    (crossed periods are counted in the image counters).
+# 3. If `lab` is given: lab-frame coefficients and contour bound of the new
+#    state (see lab_frame!), so only the synthesis product remains.
+# 4. If `skin` is given: the Verlet skin check of the new state (see
+#    skin_check_kernel!), which raises the rebuild flag for the next step.
+# 5. Work item 1 increments the device step clock.
 #
-#   x, y         (in/out) N, positions
-#   θ            (in/out) N, orientations
+#   x, y, θ      (in/out) N, positions and orientations
 #   imgx, imgy   (in/out) N, periodic image counters
 #   coef         (in/out) ncoef × N body-frame coefficients
-#   type         N, body types (index into `types`)
-#   dx, dy       N, translational displacements
-#   gθ           N, energy gradient ∂E/∂θ
-#   gcoef        ncoef × N, ∂E/∂[a₀; aₙ; bₙ] (row 1 unused)
-#   ξ            3 × N standard normal random numbers (row 3 used)
-#   types        tuple of BodyType (isbits, indexed with the type)
-#   dt           time step; Lx, Ly: box size; K: number of shape modes
-#   clock        (in/out) device step counter, incremented once (or nothing)
-#   status       run status; the kernel does nothing while it is frozen (see isactive)
-@kernel function euler_maruyama_kernel!(x, y, θ, imgx, imgy, coef, @Const(type), @Const(dx),
-        @Const(dy), @Const(gθ), @Const(gcoef), @Const(ξ), types, dt, Lx, Ly, K, clock, status)
-    @inbounds if isactive(status)
+#   gcoef        (in/out) ncoef × N, ∂E/∂[a₀; aₙ; bₙ] (out if frame)
+#   lab, labR0, rmax  (out) lab-frame coefficients, R0·lab, contour bound (or nothing)
+#   type, R0     N, body types and radius scales
+#   disp         3 × N, from displacement_kernel!
+#   gθ           N, ∂E/∂θ;  glab: ncoef × N, ∂E/∂lab / R0 from pullback! (if frame)
+#   skin         nothing, or (x0, y0, rmax0, skin) of the neighbour list
+#   types        tuple of BodyType;  dt: time step;  Lx, Ly: box;  K: shape modes
+#   clock        (in/out) device step counter (or nothing)
+#   status       (in/out) run status; nothing is done while STATUS_UPDATE is
+#                set, the skin check may raise STATUS_REBUILD
+@kernel function euler_maruyama_kernel!(x, y, θ, imgx, imgy, coef, gcoef, lab, labR0, rmax,
+        @Const(type), @Const(R0), @Const(disp), @Const(gθ), @Const(glab), frame, skin, types, dt,
+        Lx, Ly, K, clock, status)
+    @inbounds if isactive(status, STATUS_UPDATE)
         i = @index(Global)
-        tick!(clock, i)
         p = types[type[i]]
-        xn = x[i] + dx[i]
-        yn = y[i] + dy[i]
-        θ[i] += -dt * p.μθ * gθ[i] + sqrt(2 * p.Dr * dt) * ξ[3, i]
+        frame && body_frame!(gcoef, glab, coef, θ[i], R0[i], i, K)
+        θn = θ[i] - dt * p.μθ * gθ[i] + disp[3, i]
+        θ[i] = θn
         for r in 2:(2K + 1)
             coef[r, i] -= dt * p.μab * gcoef[r, i]
         end
         enforce_shape!(coef, i, K)
-        xw, sx = wrap(xn, Lx)
-        yw, sy = wrap(yn, Ly)
+        xw, sx = wrap(x[i] + disp[1, i], Lx)
+        yw, sy = wrap(y[i] + disp[2, i], Ly)
         x[i] = xw
         y[i] = yw
         imgx[i] += sx
         imgy[i] += sy
+        lab === nothing || lab_frame!(lab, labR0, rmax, coef, θn, R0[i], i, K)
+        skin === nothing || skin_flag!(status, skin, xw, yw, rmax[i], i, Lx, Ly)
+        tick!(clock, i)
     end
 end
 
 """
-    integrate!(bodies, grad, disp, ξ, children, types, dt, box, basis; clock, status)
+    integrate!(bodies, grad, disp, ξ, children, types, dt, box, basis;
+               geom, skin, frame, clock, status)
 
-One Euler–Maruyama step: translational displacements into `disp` (2 × N),
-then the update of all body variables. `clock` (device step counter) is
-incremented; nothing is updated while `status` is frozen.
+One Euler–Maruyama step: displacements and orientation noise into `disp`
+(3 × N), then the update of all body variables. `ξ` is a 3 × N matrix of
+standard normals or a `PhiloxNoise`. Fused per-body work (see
+`euler_maruyama_kernel!`): with `frame = true` the body-frame gradient is
+computed from `grad.glab` (else `grad.gcoef` is used as is); with `geom`
+the lab-frame coefficients of the new state are written to it (only the
+synthesis product of `update_geometry!` remains); with `skin = (x0, y0,
+rmax0, skin)` the Verlet skin check raises the rebuild flag in `status`.
+`clock` (device step counter) is incremented; nothing is updated while
+`status` is frozen.
 """
 function integrate!(bodies::Bodies, g::Gradients, disp, ξ, children::ChildList, types::Tuple, dt,
-        box::PeriodicBox, basis::FourierBasis; clock = nothing, status = nothing)
+        box::PeriodicBox, basis::FourierBasis; geom = nothing, skin = nothing, frame::Bool = false,
+        clock = nothing, status = nothing)
     backend = get_backend(bodies.x)
     N = nbodies(bodies)
-    dx = view(disp, 1, :)
-    dy = view(disp, 2, :)
-    displacement_kernel!(backend, WORKGROUP)(dx, dy, bodies.θ, bodies.type, bodies.parent, g.gx,
+    displacement_kernel!(backend, WORKGROUP)(disp, bodies.θ, bodies.type, bodies.parent, g.gx,
         g.gy, ξ, children.idx, children.count, types, dt, status; ndrange = N)
+    lab, labR0, rmax = geom === nothing ? (nothing, nothing, nothing) : (geom.lab, geom.labR0, geom.rmax)
     euler_maruyama_kernel!(backend, WORKGROUP)(bodies.x, bodies.y, bodies.θ, bodies.imgx,
-        bodies.imgy, bodies.coef, bodies.type, dx, dy, g.gθ, g.gcoef, ξ, types, dt, box.Lx,
-        box.Ly, nmodes(basis), clock, status; ndrange = N)
+        bodies.imgy, bodies.coef, g.gcoef, lab, labR0, rmax, bodies.type, bodies.R0, disp, g.gθ,
+        g.glab, frame, skin, types, dt, box.Lx, box.Ly, nmodes(basis), clock, status; ndrange = N)
     return bodies
 end

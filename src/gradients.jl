@@ -97,21 +97,33 @@ Base.@propagate_inbounds function _body_term!(term, GR, GD, GDD, R, dR, ddR, i, 
     return energy(term, Q, info)
 end
 
-# Single-body terms. One work item per body i.
+# Single-body terms. One work item per body i. The body-term kernels run
+# first in compute_gradients! and initialise the accumulated gradients (this
+# replaces reset!): the contour gradients of body i are zeroed and then
+# accumulated over the terms, E[i] is assigned and gx, gy, gθ are zeroed.
 #
-#   GR, GD, GDD  (in/out) nθ × N contour gradients ∂E/∂R, ∂E/∂R', ∂E/∂R'' (accumulated)
-#   E            (in/out) N, energy per body (accumulated)
+#   GR, GD, GDD  (out) nθ × N contour gradients ∂E/∂R, ∂E/∂R', ∂E/∂R''
+#   E            (out) N, energy per body
+#   gx, gy, gθ   (out) N, zeroed for the contact and bond kernels
 #   R, dR, ddR   nθ × N contour radius and its φ-derivatives at the nodes
 #   R0, type     N, radius scale and type (passed to `energy` via BodyInfo)
 #   terms        tuple of BodyTerms
 #   nθ, Δφ       number of nodes and node spacing 2π/nθ
 #   status       run status; nothing is done while it is frozen (see isactive)
-@kernel function body_terms_kernel!(GR, GD, GDD, E, @Const(R), @Const(dR), @Const(ddR),
+@kernel function body_terms_kernel!(GR, GD, GDD, E, gx, gy, gθ, @Const(R), @Const(dR), @Const(ddR),
         @Const(R0), @Const(type), terms, nθ, Δφ, status)
     @inbounds if isactive(status)
         i = @index(Global)
+        for k in 1:nθ
+            GR[k, i] = zero(eltype(GR))
+            GD[k, i] = zero(eltype(GD))
+            GDD[k, i] = zero(eltype(GDD))
+        end
+        gx[i] = zero(eltype(gx))
+        gy[i] = zero(eltype(gy))
+        gθ[i] = zero(eltype(gθ))
         info = BodyInfo(R0[i], type[i])
-        E[i] += _body_terms!(terms, GR, GD, GDD, R, dR, ddR, i, info, nθ, Δφ)
+        E[i] = _body_terms!(terms, GR, GD, GDD, R, dR, ddR, i, info, nθ, Δφ)
     end
 end
 
@@ -151,10 +163,13 @@ n_integrands(terms::Tuple, ::Type{T}) where {T} =
 # its integrands qⱼ(φₖ) in local memory; after the barrier every work item of
 # body i sums them to the same Qⱼ = Σₖ qⱼ(φₖ) Δφ and adds its own node's
 #   (GR, GD, GDD)[k, i] += Jₖᵀ w,  w = ∂F/∂Q · Δφ.
-# Node k = 1 adds the energy.
+# The kernel initialises the gradients like body_terms_kernel!: each node
+# assigns its contour gradients, node k = 1 assigns the energy and zeroes
+# gx, gy, gθ.
 #
-#   GR, GD, GDD  (in/out) nθ × N contour gradients (accumulated)
-#   E            (in/out) N, energy per body (accumulated)
+#   GR, GD, GDD  (out) nθ × N contour gradients
+#   E            (out) N, energy per body
+#   gx, gy, gθ   (out) N, zeroed for the contact and bond kernels
 #   R, dR, ddR   nθ × N contour radius and its φ-derivatives at the nodes
 #   R0, type     N, radius scale and type
 #   terms        tuple of BodyTerms
@@ -162,7 +177,7 @@ n_integrands(terms::Tuple, ::Type{T}) where {T} =
 #   Δφ           node spacing 2π/nθ
 #   nq           Val(total number of integrands), sizes the local buffer
 #   status       run status; nothing is done while it is frozen (uniform per launch)
-@kernel function body_terms_node_kernel!(GR, GD, GDD, E, @Const(R), @Const(dR), @Const(ddR),
+@kernel function body_terms_node_kernel!(GR, GD, GDD, E, gx, gy, gθ, @Const(R), @Const(dR), @Const(ddR),
         @Const(R0), @Const(type), terms, N, Δφ, nq, status)
     @uniform nθ = @groupsize()[1]
     @uniform B = @groupsize()[2]
@@ -183,10 +198,15 @@ n_integrands(terms::Tuple, ::Type{T}) where {T} =
         Q = _sum_nodes(qbuf, b, nθ, nq) * Δφ
         info = BodyInfo(R0[i], type[i])
         e, g = _node_gradients(terms, Q, info, R[k, i], dR[k, i], ddR[k, i], Δφ)
-        GR[k, i] += g[1]
-        GD[k, i] += g[2]
-        GDD[k, i] += g[3]
-        k == 1 && (E[i] += e)
+        GR[k, i] = g[1]
+        GD[k, i] = g[2]
+        GDD[k, i] = g[3]
+        if k == 1
+            E[i] = e
+            gx[i] = zero(eltype(gx))
+            gy[i] = zero(eltype(gy))
+            gθ[i] = zero(eltype(gθ))
+        end
     end
 end
 
@@ -205,17 +225,18 @@ end
 
 function body_terms!(g::Gradients, terms::Tuple, geom::Geometry, bodies::Bodies, basis::FourierBasis,
         layout::KernelLayout = BodyParallel(); status = nothing)
-    isempty(terms) && return g
+    # the body-term kernels initialise the gradients; without terms, reset them
+    isempty(terms) && return reset!(g; status)
     backend = get_backend(g.GR)
     N = nbodies(bodies)
     if uses_node_layout(layout, basis.nθ)
         T = eltype(g.GR)
         wg, nd = node_launch(basis.nθ, N)
-        body_terms_node_kernel!(backend, wg)(g.GR, g.GD, g.GDD, g.Ebody, geom.R, geom.dR,
+        body_terms_node_kernel!(backend, wg)(g.GR, g.GD, g.GDD, g.Ebody, g.gx, g.gy, g.gθ, geom.R, geom.dR,
             geom.ddR, bodies.R0, bodies.type, terms, Int32(N), basis.Δφ,
             Val(n_integrands(terms, T)), status; ndrange = nd)
     else
-        body_terms_kernel!(backend, WORKGROUP)(g.GR, g.GD, g.GDD, g.Ebody, geom.R, geom.dR,
+        body_terms_kernel!(backend, WORKGROUP)(g.GR, g.GD, g.GDD, g.Ebody, g.gx, g.gy, g.gθ, geom.R, geom.dR,
             geom.ddR, bodies.R0, bodies.type, terms, basis.nθ, basis.Δφ, status; ndrange = N)
     end
     return g
@@ -299,21 +320,27 @@ end
 @kernel function body_frame_kernel!(gcoef, @Const(glab), @Const(coef), @Const(θ), @Const(R0), K)
     @inbounds begin
         i = @index(Global)
-        r0 = R0[i]
-        ga0 = r0 * glab[1, i]
-        a0 = coef[1, i]
-        for m in 1:K
-            n = m + 1
-            gα = r0 * glab[1 + m, i]
-            gβ = r0 * glab[1 + K + m, i]
-            s, c = sincos(n * θ[i])
-            a = coef[1 + m, i]
-            b = coef[1 + K + m, i]
-            gcoef[1 + m, i] = gα * c + gβ * s - ga0 * a / (2a0)
-            gcoef[1 + K + m, i] = -gα * s + gβ * c - ga0 * b / (2a0)
-        end
-        gcoef[1, i] = ga0
+        body_frame!(gcoef, glab, coef, θ[i], R0[i], i, K)
     end
+end
+
+# The work of body_frame_kernel! for body i with orientation θi and radius
+# scale r0 (shared with the fused update kernel, see euler_maruyama_kernel!).
+Base.@propagate_inbounds function body_frame!(gcoef, glab, coef, θi, r0, i, K)
+    ga0 = r0 * glab[1, i]
+    a0 = coef[1, i]
+    for m in 1:K
+        n = m + 1
+        gα = r0 * glab[1 + m, i]
+        gβ = r0 * glab[1 + K + m, i]
+        s, c = sincos(n * θi)
+        a = coef[1 + m, i]
+        b = coef[1 + K + m, i]
+        gcoef[1 + m, i] = gα * c + gβ * s - ga0 * a / (2a0)
+        gcoef[1 + K + m, i] = -gα * s + gβ * c - ga0 * b / (2a0)
+    end
+    gcoef[1, i] = ga0
+    return nothing
 end
 
 """
@@ -326,7 +353,7 @@ one stacked transposed matrix product (three on the CPU, see
 `update_geometry!`), then `body_frame_kernel!` scales by R₀ and rotates it
 into the body frame.
 """
-function pullback!(g::Gradients, geom::Geometry, bodies::Bodies, basis::FourierBasis)
+function pullback!(g::Gradients, geom::Geometry, bodies::Bodies, basis::FourierBasis; frame::Bool = true)
     backend = get_backend(g.Gall)
     if stacked_products(backend)
         matmul!(g.glab, transpose(basis.S), g.Gall)
@@ -335,7 +362,7 @@ function pullback!(g::Gradients, geom::Geometry, bodies::Bodies, basis::FourierB
         mul!(g.glab, transpose(basis.D), g.GD, true, true)
         mul!(g.glab, transpose(basis.DD), g.GDD, true, true)
     end
-    body_frame_kernel!(backend, WORKGROUP)(g.gcoef, g.glab, bodies.coef, bodies.θ,
+    frame && body_frame_kernel!(backend, WORKGROUP)(g.gcoef, g.glab, bodies.coef, bodies.θ,
         bodies.R0, nmodes(basis); ndrange = nbodies(bodies))
     return g
 end
