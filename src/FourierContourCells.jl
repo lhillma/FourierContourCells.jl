@@ -29,11 +29,12 @@ module FourierContourCells
 using KernelAbstractions
 using KernelAbstractions: @kernel, @index, @Const, get_backend, CPU
 using LinearAlgebra: mul!
-using Random: Random, randn!
+using Random: Random
 using StaticArrays: SVector, SMatrix
 import ForwardDiff
 
 include("utils.jl")
+include("random.jl")
 include("basis.jl")
 include("box.jl")
 include("bodies.jl")

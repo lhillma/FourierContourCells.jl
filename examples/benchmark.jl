@@ -10,9 +10,8 @@ using CUDA
 
 function soft_fluid(n; backend = CPU(), T = Float64, layout = FourierContourCells.default_layout(backend))
     bodies, box = hexagonal_monolayer(n, n; packing = 0.95)
-    rng = backend isa CPU ? nothing : CUDA.RNG(1)
     return Simulation(bodies, box; types = (BodyType(v0 = 0.06, Dr = 0.01, μab = 0.1),),
-        energies = (Tension(0.01), Overlap(1.0)), dt = 0.005, backend, T, rng, layout)
+        energies = (Tension(0.01), Overlap(1.0)), dt = 0.005, backend, T, layout)
 end
 
 function ms_per_step(sim; steps = 200)

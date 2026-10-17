@@ -1,6 +1,6 @@
 """
     Simulation(bodies, box; types, energies, bonds = (), dt = 0.005, nθ = 40,
-               backend = CPU(), T = Float64, seed = 1, rng = nothing, hook! = nothing,
+               backend = CPU(), T = Float64, seed = 1, hook! = nothing,
                layout = default_layout(backend))
 
 Complete simulation state. `bodies` (host or device [`Bodies`](@ref)) are
@@ -12,8 +12,9 @@ converted to element type `T` and moved to the KernelAbstractions `backend`.
 - `bonds`: pairs `(i, j)` of bonded bodies, on which the bond terms act
   (e.g. [`parent_bonds`](@ref)`(bodies)`)
 - `nθ`: number of contour quadrature nodes
-- `rng`: random number generator compatible with `backend`
-  (default: `backend_rng(backend, seed)`)
+- `seed`: key of the counter-based Philox random numbers. The noise of body
+  `i` in step `n` depends only on (seed, i, n), so it is the same on every
+  backend and independent of the number of threads.
 - `layout`: [`KernelLayout`](@ref) of the single-body term kernel
   (`BodyParallel()` on the CPU, `NodeParallel()` on GPUs). Both give the same
   results up to round-off.
@@ -30,7 +31,7 @@ of that type to have a parent with substrate drag.
 """
 mutable struct Simulation{T, Ba <: FourierBasis{T}, Bo <: Bodies, G <: Geometry,
         Gr <: Gradients, CL <: CellList, NL <: NeighborList, ChL <: ChildList, BL <: BondList, BT <: Tuple,
-        CT <: Tuple, BoT <: Tuple, TT <: Tuple, R, Mat, H, L <: KernelLayout}
+        CT <: Tuple, BoT <: Tuple, TT <: Tuple, Mat, H, L <: KernelLayout}
     const basis::Ba
     const box::PeriodicBox{T}
     const bodies::Bo
@@ -44,7 +45,7 @@ mutable struct Simulation{T, Ba <: FourierBasis{T}, Bo <: Bodies, G <: Geometry,
     const contact_terms::CT
     const bond_terms::BoT
     const types::TT
-    const rng::R
+    const key::NTuple{2, UInt32}
     const noise::Mat
     const disp::Mat
     const hook::H
@@ -55,7 +56,7 @@ mutable struct Simulation{T, Ba <: FourierBasis{T}, Bo <: Bodies, G <: Geometry,
 end
 
 function Simulation(bodies::Bodies, box::PeriodicBox; types, energies = (), bonds = (), dt = 0.005,
-        nθ::Integer = 40, backend = CPU(), T::Type = Float64, seed = 1, rng = nothing,
+        nθ::Integer = 40, backend = CPU(), T::Type = Float64, seed::Integer = 1,
         hook! = nothing, layout::KernelLayout = default_layout(backend))
     types = map(BodyType{T}, Tuple(types))
     energies = Tuple(energies)
@@ -79,7 +80,6 @@ function Simulation(bodies::Bodies, box::PeriodicBox; types, energies = (), bond
     # Largest possible extent of a body under the shape bound, plus range of contact terms
     cutoff = 2 * maximum(host.R0) * (1 + SHAPE_BOUND) + contact_range(contact_terms)
     cells = CellList(box, cutoff, nbodies(dev); backend)
-    rng = rng === nothing ? backend_rng(backend, seed) : rng
     noise = KernelAbstractions.zeros(backend, T, 3, nbodies(dev))
     disp = KernelAbstractions.zeros(backend, T, 2, nbodies(dev))
 
@@ -87,7 +87,7 @@ function Simulation(bodies::Bodies, box::PeriodicBox; types, energies = (), bond
     children = ChildList(host.parent; backend)
     bondlist = BondList(bonds, nbodies(host); backend)
     sim = Simulation(basis, box, dev, Geometry(basis, dev), Gradients(basis, dev), cells, neighbors,
-        children, bondlist, body_terms, contact_terms, bond_terms, types, rng, noise, disp, hook!, layout,
+        children, bondlist, body_terms, contact_terms, bond_terms, types, philox_key(seed), noise, disp, hook!, layout,
         T(dt), zero(T), 0)
     enforce_shape!(dev, basis)
     update_geometry!(sim.geom, basis, dev)
@@ -109,9 +109,6 @@ end
 
 _convert_eltype(::Type{T}, A::AbstractArray{<:AbstractFloat}) where {T} = T.(A)
 _convert_eltype(::Type, A::AbstractArray) = A
-
-"Default random number generator for a backend."
-backend_rng(::CPU, seed) = Random.Xoshiro(seed)
 
 nbodies(sim::Simulation) = nbodies(sim.bodies)
 
@@ -154,7 +151,7 @@ function step!(sim::Simulation, n::Integer = 1)
         isempty(sim.contact_terms) || update_neighbors!(sim)
         compute_gradients!(sim)
         sim.hook === nothing || sim.hook(sim)
-        randn!(sim.rng, sim.noise)
+        philox_noise!(sim.noise, sim.key, sim.step)
         integrate!(sim.bodies, sim.grad, sim.disp, sim.noise, sim.children, sim.types, sim.dt,
             sim.box, sim.basis)
         update_geometry!(sim.geom, sim.basis, sim.bodies)
