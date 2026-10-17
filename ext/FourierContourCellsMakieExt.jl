@@ -10,6 +10,13 @@ struct CellView{S, P}
     plot::P
     color::Any
     periodic::Bool
+    types::Any          # nothing (all bodies) or a collection of body types
+    title::Observable{String}
+end
+
+"Several `CellView`s of one simulation drawn on top of each other (`cellplot` layers)."
+struct LayeredView{V}
+    views::V
     title::Observable{String}
 end
 
@@ -33,17 +40,22 @@ end
 
 ## Geometry
 
-"Polygons of all bodies (plus periodic images) and the body index of each."
-function polygons(sim, periodic::Bool)
+"""
+Polygons of all bodies (plus periodic images) whose type is in `types`
+(`nothing`: all), and the body index of each.
+"""
+function polygons(sim, periodic::Bool, types = nothing)
     X, Y = contours(sim)
     x = to_host(sim.bodies.x)
     y = to_host(sim.bodies.y)
     rmax = to_host(sim.geom.rmax)
+    type = to_host(sim.bodies.type)
     Lx, Ly = sim.box.Lx, sim.box.Ly
     polys = Vector{Vector{Point2f}}()
     owner = Int[]
     sizehint!(polys, nbodies(sim))
     for i in 1:nbodies(sim)
+        types === nothing || type[i] in types || continue
         base = [Point2f(X[k, i], Y[k, i]) for k in axes(X, 1)]
         push!(polys, base)
         push!(owner, i)
@@ -69,34 +81,54 @@ end
 ## API
 
 function cellview!(ax, sim; color = :shape_index, colormap = nothing, colorrange = nothing,
-        periodic::Bool = true, strokewidth = 0.5, strokecolor = :black, kwargs...)
+        periodic::Bool = true, types = nothing, box::Bool = true, strokewidth = 0.5,
+        strokecolor = :black, kwargs...)
+    types = types isa Integer ? (types,) : types
     cmap, crange = default_colors(color)
-    polys, owner = polygons(sim, periodic)
+    polys, owner = polygons(sim, periodic, types)
     plot = poly!(ax, polys; color = polygon_colors(sim, color, owner),
         colormap = something(colormap, cmap), colorrange = something(colorrange, crange),
         strokewidth, strokecolor, kwargs...)
-    Lx, Ly = sim.box.Lx, sim.box.Ly
-    lines!(ax, Point2f[(0, 0), (Lx, 0), (Lx, Ly), (0, Ly), (0, 0)]; color = :black, linewidth = 1)
-    limits!(ax, 0, Lx, 0, Ly)
-    return CellView(sim, plot, color, periodic, Observable(frame_title(sim)))
+    if box
+        Lx, Ly = sim.box.Lx, sim.box.Ly
+        lines!(ax, Point2f[(0, 0), (Lx, 0), (Lx, Ly), (0, Ly), (0, 0)]; color = :black, linewidth = 1)
+        limits!(ax, 0, Lx, 0, Ly)
+    end
+    return CellView(sim, plot, color, periodic, types, Observable(frame_title(sim)))
 end
 
 function update_view!(v::CellView)
-    polys, owner = polygons(v.sim, v.periodic)
+    polys, owner = polygons(v.sim, v.periodic, v.types)
     # update geometry and colours together, as the number of polygons may change
     Makie.update!(v.plot, polys; color = polygon_colors(v.sim, v.color, owner))
     v.title[] = frame_title(v.sim)
     return v
 end
 
-function cellplot(sim; size = (800, 700), colorbar::Bool = true, kwargs...)
+function update_view!(v::LayeredView)
+    foreach(update_view!, v.views)
+    v.title[] = first(v.views).title[]
+    return v
+end
+
+function cellplot(sim; size = (800, 700), colorbar::Bool = true, layers = nothing, kwargs...)
     fig = Figure(; size)
     ax = Axis(fig[1, 1]; aspect = DataAspect(), xlabel = "x", ylabel = "y")
-    view = cellview!(ax, sim; kwargs...)
+    if layers === nothing
+        view = cellview!(ax, sim; kwargs...)
+        cbview = view
+    else
+        # later layers are drawn on top; the box is drawn once; layer options
+        # override the common keyword arguments
+        views = [cellview!(ax, sim; kwargs..., box = n == 1, layer...) for (n, layer) in enumerate(layers)]
+        view = LayeredView(views, Observable(frame_title(sim)))
+        k = findfirst(v -> body_values(sim, v.color) !== nothing, views)
+        cbview = k === nothing ? first(views) : views[k]
+    end
     onany(t -> ax.title = t, view.title; update = true)
-    if colorbar && body_values(sim, view.color) !== nothing
-        label = view.color isa Symbol ? replace(String(view.color), "_" => " ") : ""
-        Colorbar(fig[1, 2], view.plot; label)
+    if colorbar && body_values(sim, cbview.color) !== nothing
+        label = cbview.color isa Symbol ? replace(String(cbview.color), "_" => " ") : ""
+        Colorbar(fig[1, 2], cbview.plot; label)
     end
     return fig, view
 end

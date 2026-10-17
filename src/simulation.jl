@@ -1,18 +1,32 @@
 """
-    Simulation(bodies, box; types, energies, dt = 0.005, nθ = 40,
-               backend = CPU(), T = Float64, seed = 1, rng = nothing)
+    Simulation(bodies, box; types, energies, bonds = (), dt = 0.005, nθ = 40,
+               backend = CPU(), T = Float64, seed = 1, rng = nothing, hook! = nothing)
 
 Complete simulation state. `bodies` (host or device [`Bodies`](@ref)) are
 converted to element type `T` and moved to the KernelAbstractions `backend`.
 
 - `types`: tuple of [`BodyType`](@ref), indexed by `bodies.type`
-- `energies`: tuple of [`BodyTerm`](@ref)s and [`ContactTerm`](@ref)s
+- `energies`: tuple of [`BodyTerm`](@ref)s, [`ContactTerm`](@ref)s and
+  [`BondTerm`](@ref)s
+- `bonds`: pairs `(i, j)` of bonded bodies, on which the bond terms act
+  (e.g. [`parent_bonds`](@ref)`(bodies)`)
 - `nθ`: number of contour quadrature nodes
 - `rng`: random number generator compatible with `backend`
   (default: `backend_rng(backend, seed)`)
+
+- `hook!`: optional function `hook!(sim)` called in every [`step!`](@ref)
+  after the energy gradients `sim.grad` are computed and before the
+  integration step. It may modify the gradients, e.g. to add forces that no
+  energy term expresses yet. **Meant for prototyping only**: it relies on
+  internal fields, which may change, and is not part of the GPU-ready API.
+  Once a prototype works, move it into a proper term.
+
+Body types with `drag = :parent` (see [`BodyType`](@ref)) require every body
+of that type to have a parent with substrate drag.
 """
 mutable struct Simulation{T, Ba <: FourierBasis{T}, Bo <: Bodies, G <: Geometry,
-        Gr <: Gradients, CL <: CellList, NL <: NeighborList, BT <: Tuple, CT <: Tuple, TT <: Tuple, R, Mat}
+        Gr <: Gradients, CL <: CellList, NL <: NeighborList, ChL <: ChildList, BL <: BondList, BT <: Tuple,
+        CT <: Tuple, BoT <: Tuple, TT <: Tuple, R, Mat, H}
     const basis::Ba
     const box::PeriodicBox{T}
     const bodies::Bo
@@ -20,28 +34,36 @@ mutable struct Simulation{T, Ba <: FourierBasis{T}, Bo <: Bodies, G <: Geometry,
     const grad::Gr
     const cells::CL
     const neighbors::NL
+    const children::ChL
+    const bonds::BL
     const body_terms::BT
     const contact_terms::CT
+    const bond_terms::BoT
     const types::TT
     const rng::R
     const noise::Mat
+    const disp::Mat
+    const hook::H
     dt::T
     t::T
     step::Int
 end
 
-function Simulation(bodies::Bodies, box::PeriodicBox; types, energies = (), dt = 0.005,
-        nθ::Integer = 40, backend = CPU(), T::Type = Float64, seed = 1, rng = nothing)
+function Simulation(bodies::Bodies, box::PeriodicBox; types, energies = (), bonds = (), dt = 0.005,
+        nθ::Integer = 40, backend = CPU(), T::Type = Float64, seed = 1, rng = nothing,
+        hook! = nothing)
     types = map(BodyType{T}, Tuple(types))
     energies = Tuple(energies)
     body_terms = filter(is_body_term, energies)
     contact_terms = filter(is_contact_term, energies)
-    length(body_terms) + length(contact_terms) == length(energies) ||
-        throw(ArgumentError("energy terms must be BodyTerms or ContactTerms"))
+    bond_terms = filter(is_bond_term, energies)
+    length(body_terms) + length(contact_terms) + length(bond_terms) == length(energies) ||
+        throw(ArgumentError("energy terms must be BodyTerms, ContactTerms or BondTerms"))
 
     host = to_host(bodies)
     maximum(host.type) <= length(types) || throw(ArgumentError("body type without BodyType entry"))
     host = Bodies(map(f -> _convert_eltype(T, getfield(host, f)), fieldnames(Bodies))...)
+    check_parents(host, types)
     dev = to_backend(backend, host)
 
     K = size(dev.coef, 1) ÷ 2
@@ -54,13 +76,30 @@ function Simulation(bodies::Bodies, box::PeriodicBox; types, energies = (), dt =
     cells = CellList(box, cutoff, nbodies(dev); backend)
     rng = rng === nothing ? backend_rng(backend, seed) : rng
     noise = KernelAbstractions.zeros(backend, T, 3, nbodies(dev))
+    disp = KernelAbstractions.zeros(backend, T, 2, nbodies(dev))
 
     neighbors = NeighborList(nbodies(dev); backend)
+    children = ChildList(host.parent; backend)
+    bondlist = BondList(bonds, nbodies(host); backend)
     sim = Simulation(basis, box, dev, Geometry(basis, dev), Gradients(basis, dev), cells, neighbors,
-        body_terms, contact_terms, types, rng, noise, T(dt), zero(T), 0)
+        children, bondlist, body_terms, contact_terms, bond_terms, types, rng, noise, disp, hook!,
+        T(dt), zero(T), 0)
     enforce_shape!(dev, basis)
     update_geometry!(sim.geom, basis, dev)
     return sim
+end
+
+"Check parent ids, and that bodies with parent drag have a parent with substrate drag."
+function check_parents(b::Bodies, types)
+    N = nbodies(b)
+    for i in 1:N
+        p = b.parent[i]
+        1 <= p <= N || throw(ArgumentError("body $i has parent $p outside 1:$N"))
+        types[b.type[i]].parent_drag || continue
+        p == i && throw(ArgumentError("body $i has drag = :parent but is its own parent"))
+        types[b.type[p]].parent_drag &&
+            throw(ArgumentError("body $i has drag = :parent, but so has its parent $p (one level only)"))
+    end
 end
 
 _convert_eltype(::Type{T}, A::AbstractArray{<:AbstractFloat}) where {T} = T.(A)
@@ -97,6 +136,7 @@ function compute_gradients!(sim::Simulation)
         contact_pressure!(grad.P, sim.contact_terms, geom, bodies, neighbors, box, basis)
         contact_gradient!(grad, geom, basis)
     end
+    bond_gradient!(grad, sim.bond_terms, bodies, sim.bonds, box)
     pullback!(grad, geom, bodies, basis)
     return grad
 end
@@ -110,8 +150,10 @@ function step!(sim::Simulation, n::Integer = 1)
     for _ in 1:n
         isempty(sim.contact_terms) || update_neighbors!(sim)
         compute_gradients!(sim)
+        sim.hook === nothing || sim.hook(sim)
         randn!(sim.rng, sim.noise)
-        integrate!(sim.bodies, sim.grad, sim.noise, sim.types, sim.dt, sim.box, sim.basis)
+        integrate!(sim.bodies, sim.grad, sim.disp, sim.noise, sim.children, sim.types, sim.dt,
+            sim.box, sim.basis)
         update_geometry!(sim.geom, sim.basis, sim.bodies)
         sim.t += sim.dt
         sim.step += 1

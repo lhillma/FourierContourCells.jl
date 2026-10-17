@@ -17,6 +17,11 @@
 #    a contour point of body i at penetration depth d into body j; the energy
 #    of body i is Eᵢ = Σⱼ ∫_{Ωᵢ} g(dⱼ(x)) dx and its shape derivative is
 #    g evaluated on the contour. No derivative of g is needed.
+#
+# 3. `BondTerm`: pair energy E(rᵢ - rⱼ) between the centres of explicitly
+#    listed body pairs (`Simulation(...; bonds)`), e.g. a spring between a
+#    cell and its nucleus. Users define `bond_energy`; its gradient comes from
+#    AD unless `bond_gradient` is defined by hand.
 
 "Supertype of all energy terms."
 abstract type EnergyTerm end
@@ -79,6 +84,33 @@ and `related` tells whether both bodies have the same parent. Optional:
     interaction_range(term) -> largest |d| with d < 0 at which g ≠ 0 (default 0)
 """
 abstract type ContactTerm <: EnergyTerm end
+
+"""
+    BondTerm <: EnergyTerm
+
+Pair energy between the centres of bonded bodies (bond list passed to
+[`Simulation`](@ref) as `bonds`; see [`parent_bonds`](@ref)). Required:
+
+    bond_energy(term, Δ, tᵢ, tⱼ) -> E
+
+with `Δ` = rᵢ - rⱼ (an `SVector{2}`, minimum image) and the body types `tᵢ`,
+`tⱼ`. The energy must be symmetric, E(Δ, tᵢ, tⱼ) = E(-Δ, tⱼ, tᵢ), as each
+body of a bond evaluates it from its own side. Optional:
+
+    bond_gradient(term, Δ, tᵢ, tⱼ) -> ∂E/∂Δ as SVector{2}
+
+(default: automatic differentiation). Bond energies are not included in
+[`body_energy`](@ref). Wrapped in [`OnTypes`](@ref), a bond term acts on bonds
+whose bodies both have one of the listed types.
+"""
+abstract type BondTerm <: EnergyTerm end
+
+"""
+    bond_energy(term::BondTerm, Δ, tᵢ, tⱼ) -> E
+
+Energy of a bond with centre separation `Δ = rᵢ - rⱼ` (see [`BondTerm`](@ref)).
+"""
+function bond_energy end
 
 """
     BodyInfo(R0, type)
@@ -145,6 +177,13 @@ ad_backend(::EnergyTerm) = ForwardDiffAD()
 contour_integrand_gradients(term::BodyTerm, R, dR, ddR) = ad_contour_integrand_gradients(ad_backend(term), term, R, dR, ddR)
 energy_gradient(term::BodyTerm, Q, b) = ad_energy_gradient(ad_backend(term), term, Q, b)
 
+"""
+    bond_gradient(term::BondTerm, Δ, tᵢ, tⱼ) -> SVector{2}
+
+Gradient ∂E/∂Δ of [`bond_energy`](@ref); automatic differentiation by default.
+"""
+bond_gradient(term::BondTerm, Δ, ti, tj) = ad_bond_gradient(ad_backend(term), term, Δ, ti, tj)
+
 function ad_contour_integrand_gradients(::ForwardDiffAD, term, R, dR, ddR)
     f(v) = as_svector(contour_integrands(term, v[1], v[2], v[3]))
     return ForwardDiff.jacobian(f, SVector(R, dR, ddR))
@@ -152,8 +191,11 @@ end
 
 ad_energy_gradient(::ForwardDiffAD, term, Q, b) = ForwardDiff.gradient(q -> energy(term, q, b), Q)
 
+ad_bond_gradient(::ForwardDiffAD, term, Δ, ti, tj) = ForwardDiff.gradient(d -> bond_energy(term, d, ti, tj), Δ)
+
 ad_contour_integrand_gradients(::EnzymeAD, args...) = enzyme_missing()
 ad_energy_gradient(::EnzymeAD, args...) = enzyme_missing()
+ad_bond_gradient(::EnzymeAD, args...) = enzyme_missing()
 enzyme_missing() = error("EnzymeAD requires `using Enzyme` to load the Enzyme extension")
 
 ## Normalisation of user return values
@@ -172,7 +214,8 @@ enzyme_missing() = error("EnzymeAD requires `using Enzyme` to load the Enzyme ex
     OnTypes(term, types...)
 
 Restrict `term` to bodies whose type is in `types`. For a [`ContactTerm`](@ref)
-the restriction applies to the body whose contour is evaluated (body i).
+the restriction applies to the body whose contour is evaluated (body i); a
+[`BondTerm`](@ref) acts on a bond if both bodies have a listed type.
 """
 struct OnTypes{Tm <: EnergyTerm, N} <: EnergyTerm
     term::Tm
@@ -185,6 +228,7 @@ applies_to(t::OnTypes, type) = type in t.types && applies_to(t.term, type)
 # OnTypes is a BodyTerm/ContactTerm in behaviour depending on the wrapped term
 is_body_term(t) = t isa BodyTerm || (t isa OnTypes && is_body_term(t.term))
 is_contact_term(t) = t isa ContactTerm || (t isa OnTypes && is_contact_term(t.term))
+is_bond_term(t) = t isa BondTerm || (t isa OnTypes && is_bond_term(t.term))
 
 contour_integrands(t::OnTypes, R, dR, ddR) = contour_integrands(t.term, R, dR, ddR)
 energy(t::OnTypes, Q, b) = energy(t.term, Q, b)
@@ -192,3 +236,5 @@ contour_integrand_gradients(t::OnTypes, R, dR, ddR) = contour_integrand_gradient
 energy_gradient(t::OnTypes, Q, b) = energy_gradient(t.term, Q, b)
 pressure(t::OnTypes, d, ti, tj, rel) = pressure(t.term, d, ti, tj, rel)
 interaction_range(t::OnTypes) = interaction_range(t.term)
+bond_energy(t::OnTypes, Δ, ti, tj) = bond_energy(t.term, Δ, ti, tj)
+bond_gradient(t::OnTypes, Δ, ti, tj) = bond_gradient(t.term, Δ, ti, tj)
