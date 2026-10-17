@@ -4,15 +4,19 @@
 Quantities derived from the body state that energy terms and kernels read:
 
 - `lab`: `ncoef × N` lab-frame coefficients `[a₀; αₙ; βₙ]`
+- `labR0`: `ncoef × N`, the same scaled by R₀ (input of the synthesis)
 - `R`, `dR`, `ddR`: `nθ × N` contour radius and its first two φ-derivatives
-  at the quadrature nodes
+  at the quadrature nodes: views of the row blocks of `Rall` (`3nθ × N`), so
+  that one matrix product `S * labR0` fills all three
 - `rmax`: upper bound of R(φ) per body, R₀(a₀ + Σₙ √(aₙ² + bₙ²))
 """
-struct Geometry{V <: AbstractVector, Mat <: AbstractMatrix}
+struct Geometry{V <: AbstractVector, Mat <: AbstractMatrix, VMat <: AbstractMatrix}
     lab::Mat
-    R::Mat
-    dR::Mat
-    ddR::Mat
+    labR0::Mat
+    Rall::Mat
+    R::VMat
+    dR::VMat
+    ddR::VMat
     rmax::V
 end
 
@@ -21,8 +25,10 @@ function Geometry(basis::FourierBasis, bodies::Bodies)
     T = eltype(bodies.x)
     backend = get_backend(bodies.x)
     alloc(dims...) = KernelAbstractions.zeros(backend, T, dims...)
-    return Geometry(alloc(ncoef(basis), N), alloc(basis.nθ, N), alloc(basis.nθ, N),
-        alloc(basis.nθ, N), alloc(N))
+    nθ = basis.nθ
+    Rall = alloc(3nθ, N)
+    return Geometry(alloc(ncoef(basis), N), alloc(ncoef(basis), N), Rall, row_blocks(Rall, nθ)...,
+        alloc(N))
 end
 
 # Fourier contour representation of Saito & Ishihara, Eqs. (1) and (5) of
@@ -35,8 +41,9 @@ end
 # Rotate body-frame coefficients into the lab frame and bound the contour radius.
 # One work item per body i.
 #
-#   lab   (out) ncoef × N lab-frame coefficients [a₀; αₙ; βₙ]
-#   rmax  (out) N, upper bound of Rᵢ(φ)
+#   lab    (out) ncoef × N lab-frame coefficients [a₀; αₙ; βₙ]
+#   labR0  (out) ncoef × N, R0ᵢ · lab (so that R = C · labR0)
+#   rmax   (out) N, upper bound of Rᵢ(φ)
 #   coef  ncoef × N body-frame coefficients [a₀; aₙ; bₙ]
 #   θ     N, body orientations
 #   R0    N, body radius scales
@@ -54,41 +61,50 @@ end
 #
 # Bound: |aₙ cos + bₙ sin| ≤ √(aₙ² + bₙ²) (Cauchy–Schwarz), hence
 # R ≤ R₀ (a₀ + Σₙ √(aₙ² + bₙ²)). The rotation preserves √(aₙ² + bₙ²).
-@kernel function lab_frame_kernel!(lab, rmax, @Const(coef), @Const(θ), @Const(R0), K)
+@kernel function lab_frame_kernel!(lab, labR0, rmax, @Const(coef), @Const(θ), @Const(R0), K)
     i = @index(Global)
+    r0 = R0[i]
     lab[1, i] = coef[1, i]
+    labR0[1, i] = r0 * coef[1, i]
     bound = coef[1, i]
     for m in 1:K
         n = m + 1
         a = coef[1 + m, i]
         b = coef[1 + K + m, i]
         s, c = sincos(n * θ[i])
-        lab[1 + m, i] = a * c - b * s
-        lab[1 + K + m, i] = a * s + b * c
+        α = a * c - b * s
+        β = a * s + b * c
+        lab[1 + m, i] = α
+        lab[1 + K + m, i] = β
+        labR0[1 + m, i] = r0 * α
+        labR0[1 + K + m, i] = r0 * β
         bound += sqrt(a^2 + b^2)
     end
-    rmax[i] = R0[i] * bound
+    rmax[i] = r0 * bound
 end
+
+"Views of the three `nθ`-row blocks of a `3nθ × N` matrix."
+row_blocks(A, nθ) = (view(A, 1:nθ, :), view(A, (nθ + 1):(2nθ), :), view(A, (2nθ + 1):(3nθ), :))
 
 """
     update_geometry!(geom, basis, bodies)
 
 Rotate coefficients into the lab frame and synthesise the contours of all
-bodies at the quadrature nodes: R = R₀ ⋅ (C · lab) and likewise for R', R''
-with the derivative matrices D, DD (three dense matrix products, `nθ × ncoef`
-times `ncoef × N`, followed by scaling column i by R₀ᵢ).
+bodies at the quadrature nodes: [R; R'; R''] = [C; D; DD] · (R₀ lab), one
+dense matrix product `3nθ × ncoef` times `ncoef × N` (on the CPU, three
+products into the row blocks, which BLAS runs faster).
 """
 function update_geometry!(geom::Geometry, basis::FourierBasis, bodies::Bodies)
     backend = get_backend(bodies.x)
-    lab_frame_kernel!(backend, WORKGROUP)(geom.lab, geom.rmax, bodies.coef, bodies.θ,
+    lab_frame_kernel!(backend, WORKGROUP)(geom.lab, geom.labR0, geom.rmax, bodies.coef, bodies.θ,
         bodies.R0, nmodes(basis); ndrange = nbodies(bodies))
-    R0row = reshape(bodies.R0, 1, :)
-    mul!(geom.R, basis.C, geom.lab)
-    geom.R .*= R0row
-    mul!(geom.dR, basis.D, geom.lab)
-    geom.dR .*= R0row
-    mul!(geom.ddR, basis.DD, geom.lab)
-    geom.ddR .*= R0row
+    if stacked_products(backend)
+        mul!(geom.Rall, basis.S, geom.labR0)
+    else
+        mul!(geom.R, basis.C, geom.labR0)
+        mul!(geom.dR, basis.D, geom.labR0)
+        mul!(geom.ddR, basis.DD, geom.labR0)
+    end
     return geom
 end
 

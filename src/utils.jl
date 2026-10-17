@@ -47,6 +47,12 @@ default_layout(backend) = NodeParallel()
 uses_node_layout(::NodeParallel, nθ) = nθ <= WORKGROUP
 uses_node_layout(::BodyParallel, nθ) = false
 
+# Contour synthesis and its pullback as one stacked matrix product ([C; D; DD],
+# see FourierBasis) or as three. One product saves two launches on GPUs; on
+# the CPU, BLAS is faster with three products for these thin matrices.
+stacked_products(::CPU) = false
+stacked_products(backend) = true
+
 # Workgroup (nθ, B) and padded ndrange for node-parallel kernels. The body
 # dimension is padded to a multiple of B, so every work item of a workgroup
 # reaches @synchronize; kernels skip bodies i > N.

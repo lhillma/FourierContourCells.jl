@@ -16,6 +16,8 @@ is one matrix product `C * lab` (see [`update_geometry!`](@ref)).
 Fields:
 - `C`, `D`, `DD`: `nθ × ncoef` matrices mapping lab coefficients to
   R̂, dR̂/dφ, d²R̂/dφ² (R = R₀ R̂).
+- `S`: `3nθ × ncoef`, the stacked `[C; D; DD]`, which synthesises R, R', R''
+  of all bodies in a single matrix product.
 - `Δφ`: quadrature weight 2π/nθ.
 """
 struct FourierBasis{T, Mat <: AbstractMatrix{T}}
@@ -25,6 +27,7 @@ struct FourierBasis{T, Mat <: AbstractMatrix{T}}
     C::Mat
     D::Mat
     DD::Mat
+    S::Mat
 end
 
 function FourierBasis{T}(; maxmode::Integer = 6, nθ::Integer = 40, backend = CPU()) where {T}
@@ -51,7 +54,7 @@ function FourierBasis{T}(; maxmode::Integer = 6, nθ::Integer = 40, backend = CP
         end
     end
     return FourierBasis(nθ, maxmode, T(Δφ), to_backend(backend, C),
-        to_backend(backend, D), to_backend(backend, DD))
+        to_backend(backend, D), to_backend(backend, DD), to_backend(backend, vcat(C, D, DD)))
 end
 FourierBasis(; kwargs...) = FourierBasis{Float64}(; kwargs...)
 

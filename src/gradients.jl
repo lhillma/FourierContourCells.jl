@@ -3,7 +3,8 @@
 
 Work buffers for the energy gradient.
 
-- `GR`, `GD`, `GDD`: `nθ × N` contour gradients ∂E/∂R, ∂E/∂R', ∂E/∂R''
+- `GR`, `GD`, `GDD`: `nθ × N` contour gradients ∂E/∂R, ∂E/∂R', ∂E/∂R'',
+  views of the row blocks of `Gall` (`3nθ × N`, see [`Geometry`](@ref))
 - `P`: `nθ × N` contact energy density at the contour nodes
 - `gx`, `gy`, `gθ`: ∂E/∂x, ∂E/∂y, ∂E/∂θ per body
 - `glab`: `ncoef × N` gradient with respect to lab-frame coefficients
@@ -11,10 +12,11 @@ Work buffers for the energy gradient.
   (row 1, a₀, already folded into aₙ, bₙ by the hard area constraint)
 - `Ebody`: single-body energy per body
 """
-struct Gradients{V <: AbstractVector, Mat <: AbstractMatrix}
-    GR::Mat
-    GD::Mat
-    GDD::Mat
+struct Gradients{V <: AbstractVector, Mat <: AbstractMatrix, VMat <: AbstractMatrix}
+    Gall::Mat
+    GR::VMat
+    GD::VMat
+    GDD::VMat
     P::Mat
     gx::V
     gy::V
@@ -30,13 +32,16 @@ function Gradients(basis::FourierBasis, bodies::Bodies)
     backend = get_backend(bodies.x)
     alloc(dims...) = KernelAbstractions.zeros(backend, T, dims...)
     nθ, nc = basis.nθ, ncoef(basis)
-    return Gradients(alloc(nθ, N), alloc(nθ, N), alloc(nθ, N), alloc(nθ, N), alloc(N),
-        alloc(N), alloc(N), alloc(nc, N), alloc(nc, N), alloc(N))
+    Gall = alloc(3nθ, N)
+    return Gradients(Gall, row_blocks(Gall, nθ)..., alloc(nθ, N), alloc(N), alloc(N), alloc(N),
+        alloc(nc, N), alloc(nc, N), alloc(N))
 end
 
+# Zero the accumulated gradients. P, glab and gcoef are overwritten, not
+# accumulated, by their kernels.
 function reset!(g::Gradients)
-    for f in fieldnames(Gradients)
-        fill!(getfield(g, f), 0)
+    for A in (g.Gall, g.gx, g.gy, g.gθ, g.Ebody)
+        fill!(A, 0)
     end
     return g
 end
@@ -256,22 +261,23 @@ end
 # modes, ∂a₀/∂aₙ = -aₙ/(2a₀), adding ∂E/∂a₀ · ∂a₀/∂aₙ (likewise for bₙ).
 #
 #   gcoef  (out) ncoef × N, ∂E/∂[a₀; aₙ; bₙ] (row 1 keeps the raw ∂E/∂a₀)
-#   glab   ncoef × N, ∂E/∂[a₀; αₙ; βₙ] from `pullback!`
-#   coef   ncoef × N, body-frame coefficients; θ: N, orientations
+#   glab   ncoef × N, ∂E/∂[a₀; αₙ; βₙ] / R₀ from `pullback!` (scaled by R0 here)
+#   coef   ncoef × N, body-frame coefficients; θ, R0: N, orientations and radius scales
 #   K      number of shape modes
 #
 # The θ-gradient is not taken from the lab-frame coefficients: single-body
 # terms ∮ q(R, R', R'') dφ are rotation invariant, so their exact θ-gradient
 # vanishes and the discrete one is pure quadrature aliasing. Contact terms add
 # their θ-gradient directly in `contact_gradient_kernel!`.
-@kernel function body_frame_kernel!(gcoef, @Const(glab), @Const(coef), @Const(θ), K)
+@kernel function body_frame_kernel!(gcoef, @Const(glab), @Const(coef), @Const(θ), @Const(R0), K)
     i = @index(Global)
-    ga0 = glab[1, i]
+    r0 = R0[i]
+    ga0 = r0 * glab[1, i]
     a0 = coef[1, i]
     for m in 1:K
         n = m + 1
-        gα = glab[1 + m, i]
-        gβ = glab[1 + K + m, i]
+        gα = r0 * glab[1 + m, i]
+        gβ = r0 * glab[1 + K + m, i]
         s, c = sincos(n * θ[i])
         a = coef[1 + m, i]
         b = coef[1 + K + m, i]
@@ -286,17 +292,21 @@ end
 
 Map contour gradients `GR`, `GD`, `GDD` to gradients with respect to the
 body-frame coefficients. Since R = R₀ C·lab (and R' = R₀ D·lab, R'' = R₀ DD·lab),
-the lab-frame gradient is ∂E/∂lab = R₀ (Cᵀ GR + Dᵀ GD + DDᵀ GDD): three
-transposed matrix products, then `body_frame_kernel!` rotates it into the body
-frame.
+the lab-frame gradient is ∂E/∂lab = R₀ (Cᵀ GR + Dᵀ GD + DDᵀ GDD) = R₀ Sᵀ Gall:
+one stacked transposed matrix product (three on the CPU, see
+`update_geometry!`), then `body_frame_kernel!` scales by R₀ and rotates it
+into the body frame.
 """
 function pullback!(g::Gradients, geom::Geometry, bodies::Bodies, basis::FourierBasis)
-    mul!(g.glab, transpose(basis.C), g.GR)
-    mul!(g.glab, transpose(basis.D), g.GD, true, true)
-    mul!(g.glab, transpose(basis.DD), g.GDD, true, true)
-    g.glab .*= reshape(bodies.R0, 1, :)
-    backend = get_backend(g.GR)
+    backend = get_backend(g.Gall)
+    if stacked_products(backend)
+        mul!(g.glab, transpose(basis.S), g.Gall)
+    else
+        mul!(g.glab, transpose(basis.C), g.GR)
+        mul!(g.glab, transpose(basis.D), g.GD, true, true)
+        mul!(g.glab, transpose(basis.DD), g.GDD, true, true)
+    end
     body_frame_kernel!(backend, WORKGROUP)(g.gcoef, g.glab, bodies.coef, bodies.θ,
-        nmodes(basis); ndrange = nbodies(bodies))
+        bodies.R0, nmodes(basis); ndrange = nbodies(bodies))
     return g
 end
