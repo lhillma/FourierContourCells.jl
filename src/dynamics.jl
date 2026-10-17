@@ -41,7 +41,7 @@ Constraint and bound as in Saito & Ishihara (2024), doi:10.1126/sciadv.adi8433
 the n = 2 mode because of a loop bug; here all modes are rescaled as described
 in the paper.
 """
-@inline function enforce_shape!(coef, i, K)
+Base.@propagate_inbounds function enforce_shape!(coef, i, K)
     T = eltype(coef)
     s = zero(T)
     for m in 1:K
@@ -66,8 +66,10 @@ end
 # Apply `enforce_shape!` to every body. One work item per body i.
 #   coef  (in/out) ncoef × N body-frame coefficients;  K  number of shape modes
 @kernel function enforce_shape_kernel!(coef, K)
-    i = @index(Global)
-    enforce_shape!(coef, i, K)
+    @inbounds begin
+        i = @index(Global)
+        enforce_shape!(coef, i, K)
+    end
 end
 
 function enforce_shape!(bodies::Bodies, basis::FourierBasis)
@@ -79,7 +81,7 @@ end
 # Translational displacement of a body with substrate drag, including the
 # forces on its children with drag = :parent, which it bears:
 #   Δr = dt (v0 e(θ) - μr (∂E/∂r + Σ_children ∂E/∂r_child)) + √(2 Dt dt) (ξ₁, ξ₂)
-@inline function substrate_displacement(i, θ, type, gx, gy, ξ, cidx, ccount, types, dt)
+Base.@propagate_inbounds function substrate_displacement(i, θ, type, gx, gy, ξ, cidx, ccount, types, dt)
     p = types[type[i]]
     fx = gx[i]
     fy = gy[i]
@@ -118,17 +120,19 @@ end
 #   types        tuple of BodyType;  dt: time step
 @kernel function displacement_kernel!(dx, dy, @Const(θ), @Const(type), @Const(parent), @Const(gx),
         @Const(gy), @Const(ξ), @Const(cidx), @Const(ccount), types, dt)
-    i = @index(Global)
-    p = types[type[i]]
-    if p.parent_drag
-        c = parent[i]
-        ux, uy = substrate_displacement(c, θ, type, gx, gy, ξ, cidx, ccount, types, dt)
-        s, co = sincos(θ[i])
-        σt = sqrt(2 * p.Dt * dt)
-        dx[i] = ux + dt * (p.v0 * co - p.μr * gx[i]) + σt * ξ[1, i]
-        dy[i] = uy + dt * (p.v0 * s - p.μr * gy[i]) + σt * ξ[2, i]
-    else
-        dx[i], dy[i] = substrate_displacement(i, θ, type, gx, gy, ξ, cidx, ccount, types, dt)
+    @inbounds begin
+        i = @index(Global)
+        p = types[type[i]]
+        if p.parent_drag
+            c = parent[i]
+            ux, uy = substrate_displacement(c, θ, type, gx, gy, ξ, cidx, ccount, types, dt)
+            s, co = sincos(θ[i])
+            σt = sqrt(2 * p.Dt * dt)
+            dx[i] = ux + dt * (p.v0 * co - p.μr * gx[i]) + σt * ξ[1, i]
+            dy[i] = uy + dt * (p.v0 * s - p.μr * gy[i]) + σt * ξ[2, i]
+        else
+            dx[i], dy[i] = substrate_displacement(i, θ, type, gx, gy, ξ, cidx, ccount, types, dt)
+        end
     end
 end
 
@@ -155,21 +159,23 @@ end
 #   dt           time step; Lx, Ly: box size; K: number of shape modes
 @kernel function euler_maruyama_kernel!(x, y, θ, imgx, imgy, coef, @Const(type), @Const(dx),
         @Const(dy), @Const(gθ), @Const(gcoef), @Const(ξ), types, dt, Lx, Ly, K)
-    i = @index(Global)
-    p = types[type[i]]
-    xn = x[i] + dx[i]
-    yn = y[i] + dy[i]
-    θ[i] += -dt * p.μθ * gθ[i] + sqrt(2 * p.Dr * dt) * ξ[3, i]
-    for r in 2:(2K + 1)
-        coef[r, i] -= dt * p.μab * gcoef[r, i]
+    @inbounds begin
+        i = @index(Global)
+        p = types[type[i]]
+        xn = x[i] + dx[i]
+        yn = y[i] + dy[i]
+        θ[i] += -dt * p.μθ * gθ[i] + sqrt(2 * p.Dr * dt) * ξ[3, i]
+        for r in 2:(2K + 1)
+            coef[r, i] -= dt * p.μab * gcoef[r, i]
+        end
+        enforce_shape!(coef, i, K)
+        xw, sx = wrap(xn, Lx)
+        yw, sy = wrap(yn, Ly)
+        x[i] = xw
+        y[i] = yw
+        imgx[i] += sx
+        imgy[i] += sy
     end
-    enforce_shape!(coef, i, K)
-    xw, sx = wrap(xn, Lx)
-    yw, sy = wrap(yn, Ly)
-    x[i] = xw
-    y[i] = yw
-    imgx[i] += sx
-    imgy[i] += sy
 end
 
 """

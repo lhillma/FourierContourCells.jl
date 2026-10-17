@@ -50,8 +50,8 @@ end
 
 # Accumulate contour gradients of all body terms for body i and return their
 # energy. Recursion over the term tuple is unrolled at compile time.
-@inline _body_terms!(::Tuple{}, GR, GD, GDD, R, dR, ddR, i, info, nθ, Δφ) = zero(eltype(GR))
-@inline function _body_terms!(terms::Tuple, GR, GD, GDD, R, dR, ddR, i, info, nθ, Δφ)
+Base.@propagate_inbounds _body_terms!(::Tuple{}, GR, GD, GDD, R, dR, ddR, i, info, nθ, Δφ) = zero(eltype(GR))
+Base.@propagate_inbounds function _body_terms!(terms::Tuple, GR, GD, GDD, R, dR, ddR, i, info, nθ, Δφ)
     e = _body_term!(first(terms), GR, GD, GDD, R, dR, ddR, i, info, nθ, Δφ)
     return e + _body_terms!(Base.tail(terms), GR, GD, GDD, R, dR, ddR, i, info, nθ, Δφ)
 end
@@ -62,7 +62,7 @@ end
 #   ∂E/∂Rₖ = Σⱼ (∂F/∂Qⱼ) (∂qⱼ/∂R)(φₖ) Δφ,  and likewise for R'ₖ and R''ₖ.
 # The first pass over the nodes computes Q, the second accumulates
 #   (GR, GD, GDD)[k, i] += Jₖᵀ w,  Jₖ = ∂q/∂(R, R', R'') (m × 3),  w = ∂F/∂Q · Δφ.
-@inline function _body_term!(term, GR, GD, GDD, R, dR, ddR, i, info, nθ, Δφ)
+Base.@propagate_inbounds function _body_term!(term, GR, GD, GDD, R, dR, ddR, i, info, nθ, Δφ)
     applies_to(term, info.type) || return zero(eltype(GR))
     Q = as_svector(contour_integrands(term, R[1, i], dR[1, i], ddR[1, i]))
     for k in 2:nθ
@@ -90,9 +90,11 @@ end
 #   nθ, Δφ       number of nodes and node spacing 2π/nθ
 @kernel function body_terms_kernel!(GR, GD, GDD, E, @Const(R), @Const(dR), @Const(ddR),
         @Const(R0), @Const(type), terms, nθ, Δφ)
-    i = @index(Global)
-    info = BodyInfo(R0[i], type[i])
-    E[i] += _body_terms!(terms, GR, GD, GDD, R, dR, ddR, i, info, nθ, Δφ)
+    @inbounds begin
+        i = @index(Global)
+        info = BodyInfo(R0[i], type[i])
+        E[i] += _body_terms!(terms, GR, GD, GDD, R, dR, ddR, i, info, nθ, Δφ)
+    end
 end
 
 # Integrands of all terms at one node, concatenated into one SVector; terms
@@ -148,7 +150,7 @@ n_integrands(terms::Tuple, ::Type{T}) where {T} =
     qbuf = @localmem eltype(GR) (nθ, B, _val(nq))
     k, i = @index(Global, NTuple)
     _, b = @index(Local, NTuple)
-    if i <= N
+    @inbounds if i <= N
         q = _node_integrands(terms, type[i], R[k, i], dR[k, i], ddR[k, i])
         for c in 1:_val(nq)
             qbuf[k, b, c] = q[c]
@@ -157,6 +159,7 @@ n_integrands(terms::Tuple, ::Type{T}) where {T} =
     @synchronize
     k, i = @index(Global, NTuple)
     _, b = @index(Local, NTuple)
+    # no @inbounds here: measured slower with it on CUDA (218 vs 191 µs, N = 16384)
     if i <= N
         Q = _sum_nodes(qbuf, b, nθ, nq) * Δφ
         info = BodyInfo(R0[i], type[i])
@@ -175,7 +178,7 @@ _val(::Val{n}) where {n} = n
     return SVector(ntuple(Val(nq)) do c
         s = zero(eltype(buf))
         for k in 1:nθ
-            s += buf[k, b, c]
+            s += @inbounds buf[k, b, c]
         end
         s
     end)
@@ -220,30 +223,34 @@ end
 #   P           nθ × N, contact energy density g at the nodes
 #   R, dR       nθ × N, contour radius and dR/dφ
 #   nθ, Δφ      number of nodes and node spacing
-@kernel function contact_gradient_kernel!(GR, gx, gy, gθ, @Const(P), @Const(R), @Const(dR), nθ, Δφ)
-    i = @index(Global)
-    fx = zero(eltype(gx))
-    fy = zero(eltype(gy))
-    tθ = zero(eltype(gθ))
-    for k in 1:nθ
-        p = P[k, i] * Δφ
-        r = R[k, i]
-        r′ = dR[k, i]
-        s, c = sincos((k - 1) * Δφ)
-        GR[k, i] += p * r
-        fx += p * (r * c + r′ * s)
-        fy += p * (r * s - r′ * c)
-        tθ -= p * r * r′
+#   cs          2 × nθ, (cos φₖ, sin φₖ) of the nodes
+@kernel function contact_gradient_kernel!(GR, gx, gy, gθ, @Const(P), @Const(R), @Const(dR), nθ, Δφ, @Const(cs))
+    @inbounds begin
+        i = @index(Global)
+        fx = zero(eltype(gx))
+        fy = zero(eltype(gy))
+        tθ = zero(eltype(gθ))
+        for k in 1:nθ
+            p = P[k, i] * Δφ
+            r = R[k, i]
+            r′ = dR[k, i]
+            c = cs[1, k]
+            s = cs[2, k]
+            GR[k, i] += p * r
+            fx += p * (r * c + r′ * s)
+            fy += p * (r * s - r′ * c)
+            tθ -= p * r * r′
+        end
+        gx[i] += fx
+        gy[i] += fy
+        gθ[i] += tθ
     end
-    gx[i] += fx
-    gy[i] += fy
-    gθ[i] += tθ
 end
 
 function contact_gradient!(g::Gradients, geom::Geometry, basis::FourierBasis)
     backend = get_backend(g.GR)
     contact_gradient_kernel!(backend, WORKGROUP)(g.GR, g.gx, g.gy, g.gθ, g.P, geom.R, geom.dR,
-        basis.nθ, basis.Δφ; ndrange = size(g.P, 2))
+        basis.nθ, basis.Δφ, basis.cs; ndrange = size(g.P, 2))
     return g
 end
 
@@ -270,21 +277,23 @@ end
 # vanishes and the discrete one is pure quadrature aliasing. Contact terms add
 # their θ-gradient directly in `contact_gradient_kernel!`.
 @kernel function body_frame_kernel!(gcoef, @Const(glab), @Const(coef), @Const(θ), @Const(R0), K)
-    i = @index(Global)
-    r0 = R0[i]
-    ga0 = r0 * glab[1, i]
-    a0 = coef[1, i]
-    for m in 1:K
-        n = m + 1
-        gα = r0 * glab[1 + m, i]
-        gβ = r0 * glab[1 + K + m, i]
-        s, c = sincos(n * θ[i])
-        a = coef[1 + m, i]
-        b = coef[1 + K + m, i]
-        gcoef[1 + m, i] = gα * c + gβ * s - ga0 * a / (2a0)
-        gcoef[1 + K + m, i] = -gα * s + gβ * c - ga0 * b / (2a0)
+    @inbounds begin
+        i = @index(Global)
+        r0 = R0[i]
+        ga0 = r0 * glab[1, i]
+        a0 = coef[1, i]
+        for m in 1:K
+            n = m + 1
+            gα = r0 * glab[1 + m, i]
+            gβ = r0 * glab[1 + K + m, i]
+            s, c = sincos(n * θ[i])
+            a = coef[1 + m, i]
+            b = coef[1 + K + m, i]
+            gcoef[1 + m, i] = gα * c + gβ * s - ga0 * a / (2a0)
+            gcoef[1 + K + m, i] = -gα * s + gβ * c - ga0 * b / (2a0)
+        end
+        gcoef[1, i] = ga0
     end
-    gcoef[1, i] = ga0
 end
 
 """

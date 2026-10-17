@@ -55,9 +55,10 @@ contact_range(terms::Tuple) = isempty(terms) ? 0.0 : maximum(interaction_range, 
 
 # Contact energy density Σⱼ Σ_terms g(d) at node k of body i (see
 # contact_pressure_kernel!), shared by both kernel layouts.
-@inline function _node_pressure(k, i, x, y, R, lab, rmax, R0, type, parent, nidx, ncount,
-        terms, Lx, Ly, K, Δφ, range)
-    s, c = sincos((k - 1) * Δφ)
+Base.@propagate_inbounds function _node_pressure(k, i, x, y, R, lab, rmax, R0, type, parent, nidx, ncount,
+        terms, Lx, Ly, K, cs, range)
+    c = cs[1, k]
+    s = cs[2, k]
     ux = x[i] + R[k, i] * c
     uy = y[i] + R[k, i] * s
     ti = type[i]
@@ -71,7 +72,10 @@ contact_range(terms::Tuple) = isempty(terms) ? 0.0 : maximum(interaction_range, 
         lim = rmax[j] + range
         dist2 > lim^2 && continue
         dist = sqrt(dist2)
-        d = contour_radius(lab, j, R0[j], K, atan(dy, dx)) - dist
+        # direction of u - rⱼ (ψ = 0 if u sits exactly at rⱼ, like atan(0, 0))
+        cψ = ifelse(dist > 0, dx / dist, one(dist))
+        sψ = ifelse(dist > 0, dy / dist, zero(dist))
+        d = contour_radius_dir(lab, j, R0[j], K, cψ, sψ) - dist
         p += _pressure(terms, d, ti, type[j], pi_ == parent[j])
     end
     return p
@@ -95,14 +99,17 @@ end
 #   type       N, body types; parent: N, parent ids (related = same parent)
 #   nidx, ncount  neighbour list (see NeighborList)
 #   terms      tuple of ContactTerms
-#   Lx, Ly     box size; K: number of shape modes; Δφ: node spacing
+#   Lx, Ly     box size; K: number of shape modes
+#   cs         2 × nθ, (cos φₖ, sin φₖ) of the nodes (FourierBasis.cs)
 #   range      largest interaction range of the terms beyond contact
 @kernel function contact_pressure_kernel!(P, @Const(x), @Const(y), @Const(R), @Const(lab),
         @Const(rmax), @Const(R0), @Const(type), @Const(parent), @Const(nidx), @Const(ncount),
-        terms, Lx, Ly, K, Δφ, range)
-    k, i = @index(Global, NTuple)
-    P[k, i] = _node_pressure(k, i, x, y, R, lab, rmax, R0, type, parent, nidx, ncount, terms,
-        Lx, Ly, K, Δφ, range)
+        terms, Lx, Ly, K, @Const(cs), range)
+    @inbounds begin
+        k, i = @index(Global, NTuple)
+        P[k, i] = _node_pressure(k, i, x, y, R, lab, rmax, R0, type, parent, nidx, ncount, terms,
+            Lx, Ly, K, cs, range)
+    end
 end
 
 """
@@ -116,7 +123,7 @@ function contact_pressure!(P, terms::Tuple, geom::Geometry, bodies::Bodies, nl::
     backend = get_backend(P)
     contact_pressure_kernel!(backend, (basis.nθ, max(1, WORKGROUP ÷ basis.nθ)))(P, bodies.x,
         bodies.y, geom.R, geom.lab, geom.rmax, bodies.R0, bodies.type, bodies.parent, nl.idx,
-        nl.count, terms, box.Lx, box.Ly, nmodes(basis), basis.Δφ, T(contact_range(terms));
+        nl.count, terms, box.Lx, box.Ly, nmodes(basis), basis.cs, T(contact_range(terms));
         ndrange = (basis.nθ, nbodies(bodies)))
     return P
 end
@@ -131,23 +138,25 @@ end
 #   P, GR       (out, in/out) nθ × N, energy density and ∂E/∂R (accumulated)
 #   gx, gy, gθ  (in/out) N, ∂E/∂x, ∂E/∂y, ∂E/∂θ (accumulated)
 #   N           number of bodies (the ndrange is padded, see node_launch)
+#   Δφ          node spacing (quadrature weight)
 #   other arguments as in contact_pressure_kernel!; dR: nθ × N, dR/dφ
 @kernel function contact_node_kernel!(P, GR, gx, gy, gθ, @Const(x), @Const(y), @Const(R),
         @Const(dR), @Const(lab), @Const(rmax), @Const(R0), @Const(type), @Const(parent),
-        @Const(nidx), @Const(ncount), terms, N, Lx, Ly, K, Δφ, range)
+        @Const(nidx), @Const(ncount), terms, N, Lx, Ly, K, Δφ, @Const(cs), range)
     @uniform nθ = @groupsize()[1]
     @uniform B = @groupsize()[2]
     fbuf = @localmem eltype(GR) (nθ, B, 3)
     k, i = @index(Global, NTuple)
     _, b = @index(Local, NTuple)
-    if i <= N
+    @inbounds if i <= N
         g = _node_pressure(k, i, x, y, R, lab, rmax, R0, type, parent, nidx, ncount, terms,
-            Lx, Ly, K, Δφ, range)
+            Lx, Ly, K, cs, range)
         P[k, i] = g
         p = g * Δφ
         r = R[k, i]
         r′ = dR[k, i]
-        s, c = sincos((k - 1) * Δφ)
+        c = cs[1, k]
+        s = cs[2, k]
         GR[k, i] += p * r
         fbuf[k, b, 1] = p * (r * c + r′ * s)
         fbuf[k, b, 2] = p * (r * s - r′ * c)
@@ -156,7 +165,7 @@ end
     @synchronize
     k, i = @index(Global, NTuple)
     _, b = @index(Local, NTuple)
-    if i <= N && k == 1
+    @inbounds if i <= N && k == 1
         fx = zero(eltype(GR))
         fy = zero(eltype(GR))
         tθ = zero(eltype(GR))
@@ -187,7 +196,7 @@ function contact_gradients!(g::Gradients, terms::Tuple, geom::Geometry, bodies::
         contact_node_kernel!(get_backend(g.GR), wg)(g.P, g.GR, g.gx, g.gy, g.gθ, bodies.x,
             bodies.y, geom.R, geom.dR, geom.lab, geom.rmax, bodies.R0, bodies.type,
             bodies.parent, nl.idx, nl.count, terms, Int32(N), box.Lx, box.Ly, nmodes(basis),
-            basis.Δφ, T(contact_range(terms)); ndrange = nd)
+            basis.Δφ, basis.cs, T(contact_range(terms)); ndrange = nd)
     else
         contact_pressure!(g.P, terms, geom, bodies, nl, box, basis)
         contact_gradient!(g, geom, basis)

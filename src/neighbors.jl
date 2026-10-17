@@ -47,9 +47,11 @@ box edge are clamped into the last cell.
 #   x, y    N, wrapped body positions
 #   ncx, ncy, wx, wy  grid size and cell widths (see CellList)
 @kernel function cell_index_kernel!(cellid, @Const(x), @Const(y), ncx, ncy, wx, wy)
-    i = @index(Global)
-    cx, cy = grid_coords(ncx, ncy, wx, wy, x[i], y[i])
-    cellid[i] = cx + ncx * cy + Int32(1)
+    @inbounds begin
+        i = @index(Global)
+        cx, cy = grid_coords(ncx, ncy, wx, wy, x[i], y[i])
+        cellid[i] = cx + ncx * cy + Int32(1)
+    end
 end
 
 # Find the range of each grid cell in the sorted body list. One work item per
@@ -63,13 +65,15 @@ end
 #   perm         N, body indices sorted by cellid
 #   N            number of bodies
 @kernel function cell_bounds_kernel!(start, stop, @Const(cellid), @Const(perm), N)
-    s = @index(Global)
-    c = cellid[perm[s]]
-    if s == 1 || cellid[perm[s - 1]] != c
-        start[c] = s
-    end
-    if s == N || cellid[perm[s + 1]] != c
-        stop[c] = s
+    @inbounds begin
+        s = @index(Global)
+        c = cellid[perm[s]]
+        if s == 1 || cellid[perm[s - 1]] != c
+            start[c] = s
+        end
+        if s == N || cellid[perm[s + 1]] != c
+            stop[c] = s
+        end
     end
 end
 
@@ -143,28 +147,30 @@ capacity(nl::NeighborList) = size(nl.idx, 1)
 #   cap      capacity, size(idx, 1)
 @kernel function neighbor_kernel!(idx, count, @Const(x), @Const(y), @Const(rmax), @Const(perm),
         @Const(start), @Const(stop), Lx, Ly, ncx, ncy, wx, wy, range, cap)
-    i = @index(Global)
-    xi = x[i]
-    yi = y[i]
-    ri = rmax[i] + range
-    cx, cy = grid_coords(ncx, ncy, wx, wy, xi, yi)
-    rx = ifelse(ncx >= Int32(3), Int32(1), Int32(0))
-    ry = ifelse(ncy >= Int32(3), Int32(1), Int32(0))
-    n = Int32(0)
-    for oy in (-ry):ry, ox in (-rx):rx
-        cell = mod(cx + ox, ncx) + ncx * mod(cy + oy, ncy) + Int32(1)
-        for q in start[cell]:stop[cell]
-            j = perm[q]
-            j == i && continue
-            dx = minimum_image(xi - x[j], Lx)
-            dy = minimum_image(yi - y[j], Ly)
-            if dx^2 + dy^2 <= (ri + rmax[j])^2
-                n += Int32(1)
-                n <= cap && (idx[n, i] = j)
+    @inbounds begin
+        i = @index(Global)
+        xi = x[i]
+        yi = y[i]
+        ri = rmax[i] + range
+        cx, cy = grid_coords(ncx, ncy, wx, wy, xi, yi)
+        rx = ifelse(ncx >= Int32(3), Int32(1), Int32(0))
+        ry = ifelse(ncy >= Int32(3), Int32(1), Int32(0))
+        n = Int32(0)
+        for oy in (-ry):ry, ox in (-rx):rx
+            cell = mod(cx + ox, ncx) + ncx * mod(cy + oy, ncy) + Int32(1)
+            for q in start[cell]:stop[cell]
+                j = perm[q]
+                j == i && continue
+                dx = minimum_image(xi - x[j], Lx)
+                dy = minimum_image(yi - y[j], Ly)
+                if dx^2 + dy^2 <= (ri + rmax[j])^2
+                    n += Int32(1)
+                    n <= cap && (idx[n, i] = j)
+                end
             end
         end
+        count[i] = n
     end
-    count[i] = n
 end
 
 # Drift of each body since the last neighbour list build, the quantity bounded
@@ -176,10 +182,12 @@ end
 #   Lx, Ly      box size (minimum image of the displacement)
 @kernel function drift_kernel!(drift, @Const(x), @Const(y), @Const(rmax), @Const(x0), @Const(y0),
         @Const(rmax0), Lx, Ly)
-    i = @index(Global)
-    dx = minimum_image(x[i] - x0[i], Lx)
-    dy = minimum_image(y[i] - y0[i], Ly)
-    drift[i] = sqrt(dx^2 + dy^2) + max(zero(dx), rmax[i] - rmax0[i])
+    @inbounds begin
+        i = @index(Global)
+        dx = minimum_image(x[i] - x0[i], Lx)
+        dy = minimum_image(y[i] - y0[i], Ly)
+        drift[i] = sqrt(dx^2 + dy^2) + max(zero(dx), rmax[i] - rmax0[i])
+    end
 end
 
 "Whether the neighbour list `nl` must be rebuilt for the current state."

@@ -62,25 +62,27 @@ end
 # Bound: |aₙ cos + bₙ sin| ≤ √(aₙ² + bₙ²) (Cauchy–Schwarz), hence
 # R ≤ R₀ (a₀ + Σₙ √(aₙ² + bₙ²)). The rotation preserves √(aₙ² + bₙ²).
 @kernel function lab_frame_kernel!(lab, labR0, rmax, @Const(coef), @Const(θ), @Const(R0), K)
-    i = @index(Global)
-    r0 = R0[i]
-    lab[1, i] = coef[1, i]
-    labR0[1, i] = r0 * coef[1, i]
-    bound = coef[1, i]
-    for m in 1:K
-        n = m + 1
-        a = coef[1 + m, i]
-        b = coef[1 + K + m, i]
-        s, c = sincos(n * θ[i])
-        α = a * c - b * s
-        β = a * s + b * c
-        lab[1 + m, i] = α
-        lab[1 + K + m, i] = β
-        labR0[1 + m, i] = r0 * α
-        labR0[1 + K + m, i] = r0 * β
-        bound += sqrt(a^2 + b^2)
+    @inbounds begin
+        i = @index(Global)
+        r0 = R0[i]
+        lab[1, i] = coef[1, i]
+        labR0[1, i] = r0 * coef[1, i]
+        bound = coef[1, i]
+        for m in 1:K
+            n = m + 1
+            a = coef[1 + m, i]
+            b = coef[1 + K + m, i]
+            s, c = sincos(n * θ[i])
+            α = a * c - b * s
+            β = a * s + b * c
+            lab[1 + m, i] = α
+            lab[1 + K + m, i] = β
+            labR0[1 + m, i] = r0 * α
+            labR0[1 + K + m, i] = r0 * β
+            bound += sqrt(a^2 + b^2)
+        end
+        rmax[i] = r0 * bound
     end
-    rmax[i] = r0 * bound
 end
 
 "Views of the three `nθ`-row blocks of a `3nθ × N` matrix."
@@ -124,8 +126,14 @@ addition formulas for (n+1)ψ = nψ + ψ:
 
 i.e. repeated rotation of (cos nψ, sin nψ) by ψ.
 """
-@inline function contour_radius(lab, j, R0, K, ψ)
+Base.@propagate_inbounds function contour_radius(lab, j, R0, K, ψ)
     s1, c1 = sincos(ψ)
+    return contour_radius_dir(lab, j, R0, K, c1, s1)
+end
+
+# contour_radius at the angle ψ given by its direction (cos ψ, sin ψ) = (c1, s1),
+# e.g. (dx, dy)/|(dx, dy)|, which avoids atan and sincos in kernels.
+Base.@propagate_inbounds function contour_radius_dir(lab, j, R0, K, c1, s1)
     # (c, s) holds (cos nψ, sin nψ); start at n = 1, the loop advances to n = m + 1
     c, s = c1, s1
     r = lab[1, j]

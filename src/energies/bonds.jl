@@ -96,15 +96,17 @@ end
 #   terms      tuple of BondTerms;  Lx, Ly: box size
 @kernel function bond_kernel!(gx, gy, @Const(x), @Const(y), @Const(type), @Const(bidx),
         @Const(bcount), terms, Lx, Ly)
-    i = @index(Global)
-    gi = SVector(zero(eltype(gx)), zero(eltype(gx)))
-    for q in 1:bcount[i]
-        j = bidx[q, i]
-        Δ = SVector(minimum_image(x[i] - x[j], Lx), minimum_image(y[i] - y[j], Ly))
-        gi += _bond_gradient(terms, Δ, type[i], type[j])
+    @inbounds begin
+        i = @index(Global)
+        gi = SVector(zero(eltype(gx)), zero(eltype(gx)))
+        for q in 1:bcount[i]
+            j = bidx[q, i]
+            Δ = SVector(minimum_image(x[i] - x[j], Lx), minimum_image(y[i] - y[j], Ly))
+            gi += _bond_gradient(terms, Δ, type[i], type[j])
+        end
+        gx[i] += gi[1]
+        gy[i] += gi[2]
     end
-    gx[i] += gi[1]
-    gy[i] += gi[2]
 end
 
 "Add the bond forces of `terms` on all bonds in `bl` to the centre gradients."

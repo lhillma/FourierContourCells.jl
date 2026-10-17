@@ -76,11 +76,13 @@ philox_key(seed::Integer) = ((UInt64(seed) % UInt32), ((UInt64(seed) >> 32) % UI
 #   key   Philox key (from the simulation seed)
 #   n     draw index (the step number), so every step gets fresh numbers
 @kernel function noise_kernel!(ξ, key, n)
-    i = @index(Global)
-    z = philox_normals(eltype(ξ), key, i, n)
-    ξ[1, i] = z[1]
-    ξ[2, i] = z[2]
-    ξ[3, i] = z[3]
+    @inbounds begin
+        i = @index(Global)
+        z = philox_normals(eltype(ξ), key, i, n)
+        ξ[1, i] = z[1]
+        ξ[2, i] = z[2]
+        ξ[3, i] = z[3]
+    end
 end
 
 "Fill `ξ` (3 × N) with the standard normal noise of draw `n`."
