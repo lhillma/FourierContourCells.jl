@@ -137,10 +137,8 @@ function compute_gradients!(sim::Simulation)
     (; basis, box, bodies, geom, grad, neighbors) = sim
     reset!(grad)
     body_terms!(grad, sim.body_terms, geom, bodies, basis, sim.layout)
-    if !isempty(sim.contact_terms)
-        contact_pressure!(grad.P, sim.contact_terms, geom, bodies, neighbors, box, basis)
-        contact_gradient!(grad, geom, basis)
-    end
+    isempty(sim.contact_terms) ||
+        contact_gradients!(grad, sim.contact_terms, geom, bodies, neighbors, box, basis)
     bond_gradient!(grad, sim.bond_terms, bodies, sim.bonds, box)
     pullback!(grad, geom, bodies, basis)
     return grad

@@ -41,6 +41,21 @@ end
         @test b.bodies.coef ≈ a.bodies.coef
     end
 
+    @testset "fused contact kernel matches pressure + gradient kernels" begin
+        sim = refresh!(layout_sim(BodyParallel()))
+        g = FourierContourCells.reset!(sim.grad)
+        FourierContourCells.contact_gradients!(g, sim.contact_terms, sim.geom, sim.bodies,
+            sim.neighbors, sim.box, sim.basis)
+        fused = map(copy, (g.P, g.GR, g.gx, g.gy, g.gθ))
+        FourierContourCells.reset!(g)
+        FourierContourCells.contact_pressure!(g.P, sim.contact_terms, sim.geom, sim.bodies,
+            sim.neighbors, sim.box, sim.basis)
+        FourierContourCells.contact_gradient!(g, sim.geom, sim.basis)
+        for (a, b) in zip(fused, (g.P, g.GR, g.gx, g.gy, g.gθ))
+            @test a ≈ b rtol = 1e-12 atol = 1e-12
+        end
+    end
+
     @testset "large nθ falls back to body-parallel kernels" begin
         a = refresh!(layout_sim(BodyParallel(); nθ = 300))
         b = refresh!(layout_sim(NodeParallel(); nθ = 300))

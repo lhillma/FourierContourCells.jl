@@ -31,7 +31,8 @@ to work items:
   but several times slower on the CPU (each node repeats the node sums).
 
 The default is chosen per backend by [`default_layout`](@ref); pass
-`layout` to [`Simulation`](@ref) to override it.
+`layout` to [`Simulation`](@ref) to override it. The contact kernel is
+node-parallel on all backends (on the CPU it is as fast or faster).
 """
 abstract type KernelLayout end
 struct BodyParallel <: KernelLayout end
