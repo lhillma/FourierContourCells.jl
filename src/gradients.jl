@@ -37,12 +37,29 @@ function Gradients(basis::FourierBasis, bodies::Bodies)
         alloc(nc, N), alloc(nc, N), alloc(N))
 end
 
-# Zero the accumulated gradients. P, glab and gcoef are overwritten, not
-# accumulated, by their kernels.
-function reset!(g::Gradients)
-    for A in (g.Gall, g.gx, g.gy, g.gθ, g.Ebody)
-        fill!(A, 0)
+# Zero the accumulated gradients (P, glab and gcoef are overwritten, not
+# accumulated, by their kernels). One work item per entry of Gall; the first N
+# also zero the per-body vectors.
+#
+#   Gall          (out) 3nθ × N contour gradients
+#   gx, gy, gθ, E (out) N, centre gradients and body energies
+#   status        run status; nothing is done while it is frozen (see isactive)
+@kernel function reset_kernel!(Gall, gx, gy, gθ, E, status)
+    @inbounds if isactive(status)
+        n = @index(Global)
+        Gall[n] = zero(eltype(Gall))
+        if n <= length(gx)
+            gx[n] = zero(eltype(gx))
+            gy[n] = zero(eltype(gy))
+            gθ[n] = zero(eltype(gθ))
+            E[n] = zero(eltype(E))
+        end
     end
+end
+
+function reset!(g::Gradients; status = nothing)
+    reset_kernel!(get_backend(g.Gall), WORKGROUP)(g.Gall, g.gx, g.gy, g.gθ, g.Ebody, status;
+        ndrange = length(g.Gall))
     return g
 end
 
@@ -312,7 +329,7 @@ into the body frame.
 function pullback!(g::Gradients, geom::Geometry, bodies::Bodies, basis::FourierBasis)
     backend = get_backend(g.Gall)
     if stacked_products(backend)
-        mul!(g.glab, transpose(basis.S), g.Gall)
+        matmul!(g.glab, transpose(basis.S), g.Gall)
     else
         mul!(g.glab, transpose(basis.C), g.GR)
         mul!(g.glab, transpose(basis.D), g.GD, true, true)

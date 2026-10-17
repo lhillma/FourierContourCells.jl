@@ -2,7 +2,7 @@
 
 julia_version = "1.13.1"
 manifest_format = "2.1"
-project_hash = "2544ac110120b23e35067b49b0eaef9f3281b225"
+project_hash = "d4f49d86426ad9b575d88d4f2db5b02744177c37"
 
 [[deps.AbstractFFTs]]
 deps = ["LinearAlgebra"]
@@ -764,9 +764,10 @@ deps = ["Adapt", "ForwardDiff", "KernelAbstractions", "LinearAlgebra", "Random",
 path = "."
 uuid = "199c25b0-0c5e-4658-8424-08d56a2832c7"
 version = "0.1.0"
-weakdeps = ["Enzyme", "Makie"]
+weakdeps = ["CUDA", "Enzyme", "Makie"]
 
     [deps.FourierContourCells.extensions]
+    FourierContourCellsCUDAExt = "CUDA"
     FourierContourCellsEnzymeExt = "Enzyme"
     FourierContourCellsMakieExt = "Makie"
 

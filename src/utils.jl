@@ -72,6 +72,10 @@ end
 stacked_products(::CPU) = false
 stacked_products(backend) = true
 
+# C = A·B for the stacked products. Backend extensions may override it, e.g.
+# for an allocation-free cuBLAS call that can be captured in a CUDA graph.
+matmul!(C, A, B) = mul!(C, A, B)
+
 # Workgroup (nθ, B) and padded ndrange for node-parallel kernels. The body
 # dimension is padded to a multiple of B, so every work item of a workgroup
 # reaches @synchronize; kernels skip bodies i > N.

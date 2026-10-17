@@ -94,9 +94,10 @@ end
 #   x, y       N, wrapped body positions;  type: N, body types
 #   bidx, bcount  bond partners of each body (see BondList)
 #   terms      tuple of BondTerms;  Lx, Ly: box size
+#   status     run status; nothing is done while it is frozen (see isactive)
 @kernel function bond_kernel!(gx, gy, @Const(x), @Const(y), @Const(type), @Const(bidx),
-        @Const(bcount), terms, Lx, Ly)
-    @inbounds begin
+        @Const(bcount), terms, Lx, Ly, status)
+    @inbounds if isactive(status)
         i = @index(Global)
         gi = SVector(zero(eltype(gx)), zero(eltype(gx)))
         for q in 1:bcount[i]
@@ -110,9 +111,10 @@ end
 end
 
 "Add the bond forces of `terms` on all bonds in `bl` to the centre gradients."
-function bond_gradient!(g::Gradients, terms::Tuple, bodies::Bodies, bl::BondList, box::PeriodicBox)
+function bond_gradient!(g::Gradients, terms::Tuple, bodies::Bodies, bl::BondList, box::PeriodicBox;
+        status = nothing)
     (isempty(terms) || nbodies(bodies) == 0) && return g
     bond_kernel!(get_backend(g.gx), WORKGROUP)(g.gx, g.gy, bodies.x, bodies.y, bodies.type, bl.idx,
-        bl.count, terms, box.Lx, box.Ly; ndrange = nbodies(bodies))
+        bl.count, terms, box.Lx, box.Ly, status; ndrange = nbodies(bodies))
     return g
 end

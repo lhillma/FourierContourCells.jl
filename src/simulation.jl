@@ -152,11 +152,11 @@ Requires up-to-date geometry and neighbour lists (see [`update_neighbors!`](@ref
 function compute_gradients!(sim::Simulation)
     (; basis, box, bodies, geom, grad, neighbors) = sim
     status = sim.status
-    reset!(grad)
+    reset!(grad; status)
     body_terms!(grad, sim.body_terms, geom, bodies, basis, sim.layout; status)
     isempty(sim.contact_terms) ||
         contact_gradients!(grad, sim.contact_terms, geom, bodies, neighbors, box, basis; status)
-    bond_gradient!(grad, sim.bond_terms, bodies, sim.bonds, box)
+    bond_gradient!(grad, sim.bond_terms, bodies, sim.bonds, box; status)
     pullback!(grad, geom, bodies, basis)
     return grad
 end
@@ -182,7 +182,7 @@ end
 function advance!(sim::Simulation)
     compute_gradients!(sim)
     sim.hook === nothing || sim.hook(sim)
-    philox_noise!(sim.noise, sim.key, sim.clock)
+    philox_noise!(sim.noise, sim.key, sim.clock; status = sim.status)
     integrate!(sim.bodies, sim.grad, sim.disp, sim.noise, sim.children, sim.types, sim.dt,
         sim.box, sim.basis; clock = sim.clock, status = sim.status)
     update_geometry!(sim.geom, sim.basis, sim.bodies)

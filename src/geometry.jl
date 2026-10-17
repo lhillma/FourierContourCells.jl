@@ -101,7 +101,7 @@ function update_geometry!(geom::Geometry, basis::FourierBasis, bodies::Bodies)
     lab_frame_kernel!(backend, WORKGROUP)(geom.lab, geom.labR0, geom.rmax, bodies.coef, bodies.θ,
         bodies.R0, nmodes(basis); ndrange = nbodies(bodies))
     if stacked_products(backend)
-        mul!(geom.Rall, basis.S, geom.labR0)
+        matmul!(geom.Rall, basis.S, geom.labR0)
     else
         mul!(geom.R, basis.C, geom.labR0)
         mul!(geom.dR, basis.D, geom.labR0)

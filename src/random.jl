@@ -76,8 +76,9 @@ philox_key(seed::Integer) = ((UInt64(seed) % UInt32), ((UInt64(seed) >> 32) % UI
 #   key   Philox key (from the simulation seed)
 #   n     draw index (the step number), so every step gets fresh numbers: an
 #         integer, or the device step counter `clock` (1-element vector)
-@kernel function noise_kernel!(ξ, key, n)
-    @inbounds begin
+#   status  run status; nothing is done while it is frozen (see isactive)
+@kernel function noise_kernel!(ξ, key, n, status)
+    @inbounds if isactive(status)
         i = @index(Global)
         z = philox_normals(eltype(ξ), key, i, draw_index(n))
         ξ[1, i] = z[1]
@@ -87,7 +88,8 @@ philox_key(seed::Integer) = ((UInt64(seed) % UInt32), ((UInt64(seed) >> 32) % UI
 end
 
 "Fill `ξ` (3 × N) with the standard normal noise of draw `n` (integer or device counter)."
-function philox_noise!(ξ, key, n)
-    noise_kernel!(get_backend(ξ), WORKGROUP)(ξ, key, n isa Integer ? UInt64(n) : n; ndrange = size(ξ, 2))
+function philox_noise!(ξ, key, n; status = nothing)
+    noise_kernel!(get_backend(ξ), WORKGROUP)(ξ, key, n isa Integer ? UInt64(n) : n, status;
+        ndrange = size(ξ, 2))
     return ξ
 end

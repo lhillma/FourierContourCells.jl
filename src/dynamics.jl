@@ -118,9 +118,10 @@ end
 #   ξ            3 × N standard normal random numbers (rows 1, 2 used)
 #   cidx, ccount children of each body (see ChildList)
 #   types        tuple of BodyType;  dt: time step
+#   status       run status; nothing is done while it is frozen (see isactive)
 @kernel function displacement_kernel!(dx, dy, @Const(θ), @Const(type), @Const(parent), @Const(gx),
-        @Const(gy), @Const(ξ), @Const(cidx), @Const(ccount), types, dt)
-    @inbounds begin
+        @Const(gy), @Const(ξ), @Const(cidx), @Const(ccount), types, dt, status)
+    @inbounds if isactive(status)
         i = @index(Global)
         p = types[type[i]]
         if p.parent_drag
@@ -195,7 +196,7 @@ function integrate!(bodies::Bodies, g::Gradients, disp, ξ, children::ChildList,
     dx = view(disp, 1, :)
     dy = view(disp, 2, :)
     displacement_kernel!(backend, WORKGROUP)(dx, dy, bodies.θ, bodies.type, bodies.parent, g.gx,
-        g.gy, ξ, children.idx, children.count, types, dt; ndrange = N)
+        g.gy, ξ, children.idx, children.count, types, dt, status; ndrange = N)
     euler_maruyama_kernel!(backend, WORKGROUP)(bodies.x, bodies.y, bodies.θ, bodies.imgx,
         bodies.imgy, bodies.coef, bodies.type, dx, dy, g.gθ, g.gcoef, ξ, types, dt, box.Lx,
         box.Ly, nmodes(basis), clock, status; ndrange = N)
