@@ -92,6 +92,17 @@ if CUDA.functional()
             @test same(step!(only_body(), 50), run!(only_body(), 50))
         end
 
+        @testset "concurrent simulations (one task and stream each)" begin
+            seq = [run!(gpu(; v0 = 2.0, skin = 0.05, seed), 150) for seed in 1:3]
+            par = [gpu(; v0 = 2.0, skin = 0.05, seed) for seed in 1:3]
+            @sync for s in par
+                Threads.@spawn (run!(s, 150); CUDA.synchronize())
+            end
+            @test all(Array(a.bodies.x) == Array(b.bodies.x) && Array(a.bodies.coef) == Array(b.bodies.coef)
+                for (a, b) in zip(seq, par))
+            @test Array(par[1].bodies.x) != Array(par[2].bodies.x)
+        end
+
         @testset "Float32 runs" begin
             sim = step!(gpu(; T = Float32), 50)
             @test eltype(sim.bodies.x) == Float32

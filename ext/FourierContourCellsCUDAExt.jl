@@ -16,19 +16,23 @@ using LinearAlgebra: Transpose
 #
 # cuBLAS handles run in device pointer mode, and passing α, β as numbers
 # allocates a device scalar per call. Such allocations make a captured graph
-# unlaunchable a second time, so the scalars 1 and 0 are kept per context and
-# element type.
+# unlaunchable a second time, so the scalars 1 and 0 are cached. CUDA.jl
+# tracks the stream that owns a buffer and synchronises it when another
+# stream uses the buffer, which is illegal during capture; streams are
+# task-local and concurrent simulations run in separate tasks, so the cache is
+# per stream (weak keys: a finished task's stream is collected with its entry).
 
-const SCALARS = Dict{Tuple{CUDA.CuContext, DataType}, Tuple{Any, Any}}()
+const SCALARS = WeakKeyDict{CUDA.CuStream, Dict{DataType, Tuple{Any, Any}}}()
+const SCALARS_LOCK = ReentrantLock()  # simulations may run on several threads
 
 function scalars(::Type{T}) where {T}
-    key = (CUDA.context(), T)
-    one_zero = get(SCALARS, key, nothing)
-    if one_zero === nothing
-        CUDA.is_capturing() && error("cuBLAS scalars must be created outside graph capture")
-        one_zero = SCALARS[key] = (CuRef{T}(one(T)), CuRef{T}(zero(T)))
+    s = CUDA.stream()
+    return lock(SCALARS_LOCK) do
+        get!(get!(Dict{DataType, Tuple{Any, Any}}, SCALARS, s), T) do
+            CUDA.is_capturing() && error("cuBLAS scalars must be created outside graph capture")
+            (CuRef{T}(one(T)), CuRef{T}(zero(T)))
+        end
     end
-    return one_zero
 end
 
 const BLASFloat = Union{Float32, Float64}
@@ -52,6 +56,8 @@ mutable struct StepGraph
     dt::Any
     idx::Any
     interval::Float64  # running estimate of the number of steps between rebuilds
+    since_rebuild::Int # steps since the last rebuild, kept across run! calls
+    builds::Int        # neighbour list builds when since_rebuild was last reset
 end
 
 const CHUNK_MIN = 4
@@ -62,8 +68,16 @@ const CHUNK_MAX = 256
 chunk_size(g::StepGraph, sim) = isempty(sim.contact_terms) ? CHUNK_MAX :
     clamp(round(Int, g.interval / 4), CHUNK_MIN, CHUNK_MAX)
 
+# Relaxed capture mode: further simulations running concurrently (each task
+# on its own stream) may keep synchronising while this one captures. The
+# default global mode forbids such calls on all threads, and thread-local mode
+# still on the capturing OS thread, which Julia tasks share. The captured
+# region (`device_step!`) itself makes no synchronising or allocating calls.
+const CAPTURE_MODE = CUDA.STREAM_CAPTURE_MODE_RELAXED
+
 function capture_step(sim::Simulation)
-    graph = CUDA.capture(throw_error = false) do
+    scalars(eltype(sim.bodies.x))  # create this stream's cuBLAS scalars before capturing
+    graph = CUDA.capture(throw_error = false, flags = CAPTURE_MODE) do
         device_step!(sim)
     end
     if graph === nothing
@@ -74,7 +88,7 @@ function capture_step(sim::Simulation)
             device_step!(sim)
         end
         fill!(sim.status, 0)
-        graph = CUDA.capture(() -> device_step!(sim))
+        graph = CUDA.capture(() -> device_step!(sim); flags = CAPTURE_MODE)
     end
     return CUDA.instantiate(graph)
 end
@@ -82,8 +96,9 @@ end
 function step_graph!(sim::Simulation)
     g = sim.graph[]
     if !(g isa StepGraph && g.dt == sim.dt && g.idx === sim.neighbors.idx)
-        interval = g isa StepGraph ? g.interval : 4.0 * CHUNK_MIN
-        g = StepGraph(capture_step(sim), sim.dt, sim.neighbors.idx, interval)
+        interval, since = g isa StepGraph ? (g.interval, g.since_rebuild) : (4.0 * CHUNK_MIN, 0)
+        g = StepGraph(capture_step(sim), sim.dt, sim.neighbors.idx, interval, since,
+            sim.neighbors.builds)
         sim.graph[] = g
     end
     return g
@@ -94,10 +109,13 @@ function run_steps!(::CUDABackend, sim::Simulation, n::Integer)
     # the captured step expects a valid neighbour list and a clear status
     isempty(sim.contact_terms) || update_neighbors!(sim; force = !sim.neighbors.valid)
     clock = to_host(sim.clock)[1]
-    since_rebuild = 0
     done = 0
     while done < n
         g = step_graph!(sim)
+        if sim.neighbors.builds != g.builds  # rebuilt elsewhere (eager steps, entry above)
+            g.builds = sim.neighbors.builds
+            g.since_rebuild = 0
+        end
         k = min(chunk_size(g, sim), n - done)
         for _ in 1:k
             CUDA.launch(g.exec)
@@ -111,14 +129,14 @@ function run_steps!(::CUDABackend, sim::Simulation, n::Integer)
         end
         sim.step += executed
         done += executed
-        since_rebuild += executed
+        g.since_rebuild += executed
         # a flag raised by the last step is left for the next step (as in step!)
         if status[STATUS_REBUILD] != 0 && done < n
             update_neighbors!(sim)  # sees the raised flag: rebuilds and clears it
-            g.interval = (g.interval + since_rebuild) / 2
-            since_rebuild = 0
-        elseif since_rebuild > g.interval
-            g.interval = min(since_rebuild, 4.0 * CHUNK_MAX)
+            g.interval = (g.interval + g.since_rebuild) / 2
+            g.since_rebuild = 0
+        elseif g.since_rebuild > g.interval
+            g.interval = min(g.since_rebuild, 4.0 * CHUNK_MAX)
         end
     end
     return sim
