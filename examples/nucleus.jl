@@ -7,6 +7,11 @@
 #   julia -t auto --project=examples examples/nucleus.jl movie    # writes output/nucleus.mp4
 #   julia -t auto --project=examples examples/nucleus.jl test     # pull-in (wetting) check
 #
+# The monolayer runs on a CUDA GPU in Float32 if one is available (`run!`
+# then replays steps as CUDA graphs), otherwise on the CPU in Float64.
+# Options for live, check and movie: backend=cpu|gpu  T=Float32|Float64.
+# The `test` mode always runs on the CPU in Float64 (exact checks).
+#
 # Extension of the Fourier contour cell model of N. Saito and S. Ishihara,
 # Sci. Adv. 10, eadi8433 (2024), doi:10.1126/sciadv.adi8433.
 #
@@ -35,6 +40,7 @@
 
 using FourierContourCells
 using GLMakie
+using CUDA
 
 const CELL, NUCLEUS = 1, 2
 
@@ -55,11 +61,25 @@ end
 cell_type(; v0 = 0.06, Dr = 0.01) = BodyType(; v0, Dr, μab = 0.1)
 nucleus_type(; Dr = 0.01, drag = :parent) = BodyType(; v0 = 0.0, Dr, μab = 0.1, drag)
 
+# Command line options key=value (after the mode)
+const OPTS = Dict(Pair(split(a, "="; limit = 2)...) for a in ARGS[2:end] if occursin('=', a))
+
+# Compute backend and precision: a CUDA GPU in Float32 if available (Float64
+# is slow on consumer GPUs), else the CPU in Float64.
+function backend_and_precision()
+    gpu = get(OPTS, "backend", CUDA.functional() ? "gpu" : "cpu") == "gpu"
+    gpu && !CUDA.functional() && error("backend=gpu, but CUDA is not functional")
+    backend = gpu ? CUDABackend() : CPU()
+    T = Dict("Float32" => Float32, "Float64" => Float64)[get(OPTS, "T", gpu ? "Float32" : "Float64")]
+    return backend, T
+end
+
 function monolayer(; drag = :parent, kwargs...)
     cells, box = hexagonal_monolayer(32, 32; packing = 0.95)
     bodies = with_nuclei(cells; ratio = 0.5, type = NUCLEUS)
+    backend, T = backend_and_precision()
     return Simulation(bodies, box; types = (cell_type(), nucleus_type(; drag)),
-        energies = energies(; kwargs...), bonds = parent_bonds(bodies), dt = 0.005)
+        energies = energies(; kwargs...), bonds = parent_bonds(bodies), dt = 0.005, backend, T)
 end
 
 # cells coloured by shape index, nuclei on top
@@ -157,18 +177,24 @@ mode = get(ARGS, 1, "live")
 if mode == "test"
     run_tests()
 elseif mode == "check"
-    opts = Dict(Pair(split(a, "=")...) for a in ARGS[2:end])
-    drag = Symbol(get(opts, "drag", "parent"))
-    Jw = parse(Float64, get(opts, "Jw", string(WRAP)))
-    k = parse(Float64, get(opts, "k", string(BOND)))
-    ηn = parse(Float64, get(opts, "ηn", "0.05"))
+    drag = Symbol(get(OPTS, "drag", "parent"))
+    Jw = parse(Float64, get(OPTS, "Jw", string(WRAP)))
+    k = parse(Float64, get(OPTS, "k", string(BOND)))
+    ηn = parse(Float64, get(OPTS, "ηn", "0.05"))
     println("drag = ", drag, ", Jw = ", Jw, ", k = ", k, ", ηn = ", ηn)
     sim = monolayer(; drag, Jw, k, ηn)
+    println(sim)
     X0 = unwrapped_positions(sim)
+    run!(sim, 100)  # compile (and capture the CUDA graph) outside the timing
+    seconds = 0.0
     for _ in 1:10
-        step!(sim, 2_000)
+        global seconds += @elapsed begin
+            run!(sim, 2_000)
+            CUDA.functional() && CUDA.synchronize()
+        end
         report(sim)
     end
+    println("time per step: ", round(seconds / 20_000 * 1e3; digits = 3), " ms")
     shape_report(sim)
     println("mean cell displacement: ", round(mean_cell_displacement(sim, X0); digits = 3))
     mkpath(joinpath(@__DIR__, "..", "output"))
@@ -177,7 +203,7 @@ elseif mode == "check"
     println("wrote ", path)
 elseif mode == "movie"
     sim = monolayer()
-    step!(sim, 20_000)
+    run!(sim, 20_000)
     mkpath(joinpath(@__DIR__, "..", "output"))
     path = joinpath(@__DIR__, "..", "output", "nucleus.mp4")
     println("wrote ", FourierContourCells.record_movie(sim, path; frames = 600, steps_per_frame = 100,
@@ -202,6 +228,10 @@ end
 #   (9.0 vs 4.0 ms/step on 1 thread, 3.5 vs 1.6 ms/step on 16 threads).
 #   Nuclei enter the neighbour lists of nearby cells, and the contact kernel
 #   evaluates each cell–own-nucleus pair (needed for the wrap coupling).
+#   After the GPU work (`check`, t = 100): 2.3 ms/step on 16 CPU threads
+#   (Float64), 0.26 ms/step on an RTX A2000 Laptop GPU (Float32, CUDA
+#   graphs). GPU and CPU statistics agree (mean cell displacement 0.93 vs
+#   0.94, ⟨p⟩ of cells 3.819 vs 3.823, no protruding nuclei).
 # - All body types share the number of shape modes and contour nodes.
 # - Bond energies are not included in `body_energy`.
 #
