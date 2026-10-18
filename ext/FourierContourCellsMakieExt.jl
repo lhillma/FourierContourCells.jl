@@ -145,7 +145,7 @@ function live_view(sim; steps_per_frame::Integer = 20, kwargs...)
     screen = display(fig)
     while isopen(screen)
         if running[]
-            step!(sim, slider.value[])
+            run!(sim, slider.value[])  # CUDA graphs on the GPU
             update_view!(view)
         end
         sleep(1 / 120)   # yield to the renderer
@@ -157,7 +157,7 @@ function record_movie(sim, path::AbstractString; frames::Integer = 300, steps_pe
         framerate::Integer = 30, kwargs...)
     fig, view = cellplot(sim; kwargs...)
     record(fig, path, 1:frames; framerate) do _
-        step!(sim, steps_per_frame)
+        run!(sim, steps_per_frame)
         update_view!(view)
     end
     return path
