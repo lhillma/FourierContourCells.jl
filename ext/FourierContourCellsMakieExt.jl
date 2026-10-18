@@ -5,12 +5,19 @@ using FourierContourCells: to_host
 import FourierContourCells: cellview!, update_view!, cellplot, live_view, record_movie
 using Makie
 
-struct CellView{S, P}
+# One layer of bodies, drawn as a single mesh (filled contours) plus a single
+# line plot (outlines) with fixed topology, see `Geometry` below. Updating a
+# frame only replaces vertex positions and colours.
+struct CellView{S, P, L}
     sim::S
-    plot::P
+    plot::P             # the mesh (carries colormap and colorrange, e.g. for a Colorbar)
+    outline::L
+    vertices::Observable{Vector{Point2f}}
+    colors::Observable{Any}
+    strokes::Observable{Vector{Point2f}}
     color::Any
     periodic::Bool
-    types::Any          # nothing (all bodies) or a collection of body types
+    members::Vector{Int}  # drawn bodies (those of the selected types)
     title::Observable{String}
 end
 
@@ -39,44 +46,79 @@ function default_colors(color)
 end
 
 ## Geometry
+#
+# Contours are star-shaped around the body centre (R(φ) in polar form), so
+# each one is filled by a fixed triangle fan: vertex 0 at the centre, vertices
+# 1…nθ at the contour nodes, triangles (0, k, k + 1). Each drawn body has
+# `copies` slots: the body itself and, with `periodic`, up to three periodic
+# images (shifted by Lx, Ly or both) for bodies crossing the box boundary.
+# Unused image slots collapse onto the body centre (zero-area triangles,
+# no outline), so the mesh topology never changes and Makie never has to
+# triangulate.
+
+copies(periodic) = periodic ? 4 : 1
+
+"Triangle faces of `nslots` contour fans with `nθ` nodes each."
+function fan_faces(nslots, nθ)
+    faces = Makie.GLTriangleFace[]
+    sizehint!(faces, nslots * nθ)
+    for s in 0:(nslots - 1)
+        c = s * (nθ + 1) + 1
+        for k in 1:nθ
+            push!(faces, Makie.GLTriangleFace(c, c + k, c + mod1(k + 1, nθ)))
+        end
+    end
+    return faces
+end
 
 """
-Polygons of all bodies (plus periodic images) whose type is in `types`
-(`nothing`: all), and the body index of each.
+Vertices (fans) and outline points (closed contours separated by NaN) of
+the bodies `members`, and the body index of each vertex slot.
 """
-function polygons(sim, periodic::Bool, types = nothing)
+function geometry(sim, periodic::Bool, members)
     X, Y = contours(sim)
     x = to_host(sim.bodies.x)
     y = to_host(sim.bodies.y)
     rmax = to_host(sim.geom.rmax)
-    type = to_host(sim.bodies.type)
+    nθ = size(X, 1)
     Lx, Ly = sim.box.Lx, sim.box.Ly
-    polys = Vector{Vector{Point2f}}()
-    owner = Int[]
-    sizehint!(polys, nbodies(sim))
-    for i in 1:nbodies(sim)
-        types === nothing || type[i] in types || continue
-        base = [Point2f(X[k, i], Y[k, i]) for k in axes(X, 1)]
-        push!(polys, base)
-        push!(owner, i)
-        periodic || continue
+    ncp = copies(periodic)
+    verts = Vector{Point2f}(undef, length(members) * ncp * (nθ + 1))
+    strokes = Vector{Point2f}(undef, length(members) * ncp * (nθ + 2))
+    nan = Point2f(NaN, NaN)
+    v = s = 0
+    for i in members
         sx = x[i] - rmax[i] < 0 ? Lx : x[i] + rmax[i] > Lx ? -Lx : zero(Lx)
         sy = y[i] - rmax[i] < 0 ? Ly : y[i] + rmax[i] > Ly ? -Ly : zero(Ly)
-        for (dx, dy) in ((sx, zero(sy)), (zero(sx), sy), (sx, sy))
-            (dx == 0 && dy == 0) && continue
-            push!(polys, base .+ Point2f(dx, dy))
-            push!(owner, i)
+        for c in 0:(ncp - 1)  # slot c: shift in x if c is odd, in y if c ≥ 2
+            cx = isodd(c)
+            cy = c >= 2
+            used = (!cx || sx != 0) && (!cy || sy != 0)
+            dx = cx ? sx : zero(sx)
+            dy = cy ? sy : zero(sy)
+            centre = Point2f(x[i] + dx, y[i] + dy)
+            verts[v += 1] = centre
+            for k in 1:nθ
+                p = Point2f(X[k, i] + dx, Y[k, i] + dy)
+                verts[v += 1] = used ? p : centre
+                strokes[s += 1] = used ? p : nan
+            end
+            strokes[s += 1] = used ? Point2f(X[1, i] + dx, Y[1, i] + dy) : nan
+            strokes[s += 1] = nan
         end
     end
-    return polys, owner
+    return verts, strokes
+end
+
+"Per-vertex colour values (or a fixed colour) for `geometry`."
+function vertex_colors(sim, color, members, periodic::Bool)
+    vals = body_values(sim, color)
+    vals === nothing && return color
+    n = copies(periodic) * (sim.basis.nθ + 1)
+    return repeat(vals[members]; inner = n)
 end
 
 frame_title(sim) = "N = $(nbodies(sim)),  t = $(round(sim.t; digits = 2))  (step $(sim.step))"
-
-function polygon_colors(sim, color, owner)
-    v = body_values(sim, color)
-    return v === nothing ? color : v[owner]
-end
 
 ## API
 
@@ -85,31 +127,53 @@ function cellview!(ax, sim; color = :shape_index, colormap = nothing, colorrange
         strokecolor = :black, kwargs...)
     types = types isa Integer ? (types,) : types
     cmap, crange = default_colors(color)
-    polys, owner = polygons(sim, periodic, types)
-    plot = poly!(ax, polys; color = polygon_colors(sim, color, owner),
+    type = to_host(sim.bodies.type)
+    members = [i for i in 1:nbodies(sim) if types === nothing || type[i] in types]
+    verts, strokes = geometry(sim, periodic, members)
+    vertices = Observable(verts)
+    colors = Observable{Any}(vertex_colors(sim, color, members, periodic))
+    stroke_points = Observable(strokes)
+    faces = fan_faces(length(members) * copies(periodic), sim.basis.nθ)
+    plot = mesh!(ax, map(v -> Makie.GeometryBasics.Mesh(v, faces), vertices); color = colors,
         colormap = something(colormap, cmap), colorrange = something(colorrange, crange),
-        strokewidth, strokecolor, kwargs...)
+        shading = Makie.NoShading, kwargs...)
+    outline = lines!(ax, stroke_points; color = strokecolor, linewidth = strokewidth)
     if box
         Lx, Ly = sim.box.Lx, sim.box.Ly
         lines!(ax, Point2f[(0, 0), (Lx, 0), (Lx, Ly), (0, Ly), (0, 0)]; color = :black, linewidth = 1)
         limits!(ax, 0, Lx, 0, Ly)
     end
-    return CellView(sim, plot, color, periodic, types, Observable(frame_title(sim)))
+    return CellView(sim, plot, outline, vertices, colors, stroke_points, color, periodic, members,
+        Observable(frame_title(sim)))
 end
 
-function update_view!(v::CellView)
-    polys, owner = polygons(v.sim, v.periodic, v.types)
-    # update geometry and colours together, as the number of polygons may change
-    Makie.update!(v.plot, polys; color = polygon_colors(v.sim, v.color, owner))
-    v.title[] = frame_title(v.sim)
+# Updating a view has two parts: `frame_data` reads the simulation and builds
+# everything to draw on the host (device transfers, vertices, colours, title),
+# `apply!` hands it to Makie. live_view and record_movie run frame_data on a
+# producer thread next to the simulation, so the main thread only renders.
+
+function frame_data(v::CellView, sim = v.sim)
+    verts, strokes = geometry(sim, v.periodic, v.members)
+    return (; verts, strokes, color = vertex_colors(sim, v.color, v.members, v.periodic),
+        title = frame_title(sim))
+end
+frame_data(v::LayeredView, sim = first(v.views).sim) = map(w -> frame_data(w, sim), v.views)
+
+function apply!(v::CellView, data)
+    # fixed topology: same vertex count every frame, only positions and colours change
+    data.color isa AbstractVector && (v.colors[] = data.color)
+    v.vertices[] = data.verts
+    v.strokes[] = data.strokes
+    v.title[] = data.title
+    return v
+end
+function apply!(v::LayeredView, data)
+    foreach(apply!, v.views, data)
+    v.title[] = first(data).title
     return v
 end
 
-function update_view!(v::LayeredView)
-    foreach(update_view!, v.views)
-    v.title[] = first(v.views).title[]
-    return v
-end
+update_view!(v::Union{CellView, LayeredView}) = apply!(v, frame_data(v))
 
 function cellplot(sim; size = (800, 700), colorbar::Bool = true, layers = nothing, kwargs...)
     fig = Figure(; size)
@@ -133,6 +197,39 @@ function cellplot(sim; size = (800, 700), colorbar::Bool = true, layers = nothin
     return fig, view
 end
 
+## Producer: simulation and frame preparation on another thread
+#
+# The producer advances the simulation by steps_per_frame steps, prepares the
+# frame data and puts it into a channel of length 1, so it computes frame k + 1
+# while the main thread renders (or encodes) frame k. `put!` blocks while the
+# previous frame is not taken yet: every frame is exactly steps_per_frame
+# steps after the previous one, as with sequential stepping. Only the producer
+# touches the simulation until it has finished.
+
+function start_producer(sim, view, steps::Function, nframes, active::Function)
+    frames = Channel{Any}(1)
+    task = Threads.@spawn begin
+        try
+            n = 0
+            while n < nframes && isopen(frames)
+                if active()
+                    run!(sim, steps())  # CUDA graphs on the GPU
+                    put!(frames, frame_data(view, sim))
+                    n += 1
+                else
+                    sleep(0.01)
+                end
+            end
+        catch err
+            # closing the channel (window closed) ends the producer
+            err isa InvalidStateException && !isopen(frames) || rethrow()
+        finally
+            close(frames)
+        end
+    end
+    return frames, task
+end
+
 function live_view(sim; steps_per_frame::Integer = 20, kwargs...)
     fig, view = cellplot(sim; kwargs...)
     controls = GridLayout(fig[2, 1:end]; tellwidth = false)
@@ -142,13 +239,21 @@ function live_view(sim; steps_per_frame::Integer = 20, kwargs...)
     Label(controls[1, 2], "steps / frame")
     slider = Slider(controls[1, 3]; range = 1:500, startvalue = steps_per_frame, width = 300)
     Label(controls[1, 4], @lift(string($(slider.value))))
+    # the producer reads the controls through atomics, not Observables
+    active = Threads.Atomic{Bool}(true)
+    steps = Threads.Atomic{Int}(steps_per_frame)
+    on(r -> active[] = r, running)
+    on(n -> steps[] = n, slider.value)
     screen = display(fig)
-    while isopen(screen)
-        if running[]
-            run!(sim, slider.value[])  # CUDA graphs on the GPU
-            update_view!(view)
+    frames, task = start_producer(sim, view, () -> steps[], typemax(Int), () -> active[])
+    try
+        while isopen(screen) && !istaskdone(task)
+            isready(frames) && apply!(view, take!(frames))
+            sleep(1 / 120)   # yield to the renderer
         end
-        sleep(1 / 120)   # yield to the renderer
+    finally
+        close(frames)
+        wait(task)       # rethrows errors of the producer; afterwards sim is ours again
     end
     return sim
 end
@@ -156,9 +261,14 @@ end
 function record_movie(sim, path::AbstractString; frames::Integer = 300, steps_per_frame::Integer = 20,
         framerate::Integer = 30, kwargs...)
     fig, view = cellplot(sim; kwargs...)
-    record(fig, path, 1:frames; framerate) do _
-        run!(sim, steps_per_frame)
-        update_view!(view)
+    channel, task = start_producer(sim, view, () -> steps_per_frame, frames, () -> true)
+    try
+        record(fig, path, 1:frames; framerate) do _
+            apply!(view, take!(channel))
+        end
+    finally
+        close(channel)
+        wait(task)
     end
     return path
 end
