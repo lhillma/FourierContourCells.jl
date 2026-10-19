@@ -1,6 +1,7 @@
 """
     Simulation(bodies, box; types, energies, bonds = (), dt = 0.005, nθ = 40,
-               backend = CPU(), T = Float64, seed = 1, rng = nothing, hook! = nothing)
+               backend = CPU(), T = Float64, seed = 1, skin = 0.3, hook! = nothing,
+               layout = default_layout(backend))
 
 Complete simulation state. `bodies` (host or device [`Bodies`](@ref)) are
 converted to element type `T` and moved to the KernelAbstractions `backend`.
@@ -8,25 +9,35 @@ converted to element type `T` and moved to the KernelAbstractions `backend`.
 - `types`: tuple of [`BodyType`](@ref), indexed by `bodies.type`
 - `energies`: tuple of [`BodyTerm`](@ref)s, [`ContactTerm`](@ref)s and
   [`BondTerm`](@ref)s
+- `T`: floating-point precision of the state; the parameters of `types` and
+  `energies` are converted to it (see [`convert_precision`](@ref))
 - `bonds`: pairs `(i, j)` of bonded bodies, on which the bond terms act
   (e.g. [`parent_bonds`](@ref)`(bodies)`)
 - `nθ`: number of contour quadrature nodes
-- `rng`: random number generator compatible with `backend`
-  (default: `backend_rng(backend, seed)`)
+- `skin`: Verlet skin of the neighbour list (length). The list is rebuilt
+  only when a body has drifted (moved, or grown its contour bound) by more
+  than skin/2 since the last build; `skin = 0` rebuilds every step. Larger
+  skins mean fewer rebuilds but longer neighbour lists.
+- `seed`: key of the counter-based Philox random numbers. The noise of body
+  `i` in step `n` depends only on (seed, i, n), so it is the same on every
+  backend and independent of the number of threads.
+- `layout`: [`KernelLayout`](@ref) of the single-body term kernel
+  (`BodyParallel()` on the CPU, `NodeParallel()` on GPUs). Both give the same
+  results up to round-off.
 
 - `hook!`: optional function `hook!(sim)` called in every [`step!`](@ref)
   after the energy gradients `sim.grad` are computed and before the
   integration step. It may modify the gradients, e.g. to add forces that no
   energy term expresses yet. **Meant for prototyping only**: it relies on
-  internal fields, which may change, and is not part of the GPU-ready API.
-  Once a prototype works, move it into a proper term.
+  internal fields, which may change, and turns off the graph mode of
+  [`run!`](@ref) on GPUs. Once a prototype works, move it into a proper term.
 
 Body types with `drag = :parent` (see [`BodyType`](@ref)) require every body
 of that type to have a parent with substrate drag.
 """
 mutable struct Simulation{T, Ba <: FourierBasis{T}, Bo <: Bodies, G <: Geometry,
         Gr <: Gradients, CL <: CellList, NL <: NeighborList, ChL <: ChildList, BL <: BondList, BT <: Tuple,
-        CT <: Tuple, BoT <: Tuple, TT <: Tuple, R, Mat, H}
+        CT <: Tuple, BoT <: Tuple, TT <: Tuple, Mat, H, L <: KernelLayout, VS <: AbstractVector{Int32}, VC <: AbstractVector{Int64}}
     const basis::Ba
     const box::PeriodicBox{T}
     const bodies::Bo
@@ -40,25 +51,29 @@ mutable struct Simulation{T, Ba <: FourierBasis{T}, Bo <: Bodies, G <: Geometry,
     const contact_terms::CT
     const bond_terms::BoT
     const types::TT
-    const rng::R
-    const noise::Mat
+    const key::NTuple{2, UInt32}
     const disp::Mat
     const hook::H
+    const layout::L
+    const status::VS
+    const clock::VC
+    const graph::Base.RefValue{Any}
     dt::T
     t::T
     step::Int
 end
 
 function Simulation(bodies::Bodies, box::PeriodicBox; types, energies = (), bonds = (), dt = 0.005,
-        nθ::Integer = 40, backend = CPU(), T::Type = Float64, seed = 1, rng = nothing,
-        hook! = nothing)
+        nθ::Integer = 40, backend = CPU(), T::Type = Float64, seed::Integer = 1, skin::Real = 0.3,
+        hook! = nothing, layout::KernelLayout = default_layout(backend))
     types = map(BodyType{T}, Tuple(types))
     energies = Tuple(energies)
+    all(t -> is_body_term(t) || is_contact_term(t) || is_bond_term(t), energies) ||
+        throw(ArgumentError("energy terms must be BodyTerms, ContactTerms or BondTerms"))
+    energies = map(t -> convert_precision(T, t), energies)
     body_terms = filter(is_body_term, energies)
     contact_terms = filter(is_contact_term, energies)
     bond_terms = filter(is_bond_term, energies)
-    length(body_terms) + length(contact_terms) + length(bond_terms) == length(energies) ||
-        throw(ArgumentError("energy terms must be BodyTerms, ContactTerms or BondTerms"))
 
     host = to_host(bodies)
     maximum(host.type) <= length(types) || throw(ArgumentError("body type without BodyType entry"))
@@ -72,17 +87,17 @@ function Simulation(bodies::Bodies, box::PeriodicBox; types, energies = (), bond
     box = PeriodicBox{T}(box)
 
     # Largest possible extent of a body under the shape bound, plus range of contact terms
-    cutoff = 2 * maximum(host.R0) * (1 + SHAPE_BOUND) + contact_range(contact_terms)
+    cutoff = 2 * maximum(host.R0) * (1 + SHAPE_BOUND) + contact_range(contact_terms) + skin
     cells = CellList(box, cutoff, nbodies(dev); backend)
-    rng = rng === nothing ? backend_rng(backend, seed) : rng
-    noise = KernelAbstractions.zeros(backend, T, 3, nbodies(dev))
-    disp = KernelAbstractions.zeros(backend, T, 2, nbodies(dev))
+    disp = KernelAbstractions.zeros(backend, T, 3, nbodies(dev))
 
-    neighbors = NeighborList(nbodies(dev); backend)
+    neighbors = NeighborList(nbodies(dev), T; skin, backend)
     children = ChildList(host.parent; backend)
     bondlist = BondList(bonds, nbodies(host); backend)
     sim = Simulation(basis, box, dev, Geometry(basis, dev), Gradients(basis, dev), cells, neighbors,
-        children, bondlist, body_terms, contact_terms, bond_terms, types, rng, noise, disp, hook!,
+        children, bondlist, body_terms, contact_terms, bond_terms, types, philox_key(seed), disp, hook!, layout,
+        KernelAbstractions.zeros(backend, Int32, STATUS_LENGTH), KernelAbstractions.zeros(backend, Int64, 1),
+        Ref{Any}(nothing),
         T(dt), zero(T), 0)
     enforce_shape!(dev, basis)
     update_geometry!(sim.geom, basis, dev)
@@ -105,20 +120,24 @@ end
 _convert_eltype(::Type{T}, A::AbstractArray{<:AbstractFloat}) where {T} = T.(A)
 _convert_eltype(::Type, A::AbstractArray) = A
 
-"Default random number generator for a backend."
-backend_rng(::CPU, seed) = Random.Xoshiro(seed)
-
 nbodies(sim::Simulation) = nbodies(sim.bodies)
 
 """
-    update_neighbors!(sim)
+    update_neighbors!(sim; force = false)
 
-Rebuild the cell list and the per-body neighbour list for the current state.
+Rebuild the cell list and the per-body neighbour list if the Verlet skin no
+longer covers the current state (see `skin` in [`Simulation`](@ref)), or
+always with `force = true`. Requires up-to-date geometry.
 """
-function update_neighbors!(sim::Simulation)
+function update_neighbors!(sim::Simulation; force::Bool = false)
+    nl = sim.neighbors
+    if !force && nl.valid && nl.skin > 0
+        skin_check!(sim.status, nl, sim.bodies, sim.geom.rmax, sim.box)
+        to_host(sim.status)[STATUS_REBUILD] == 0 && return sim
+    end
     update_celllist!(sim.cells, sim.bodies)
-    update_neighbors!(sim.neighbors, sim.cells, sim.bodies, sim.geom.rmax, sim.box,
-        contact_range(sim.contact_terms))
+    update_neighbors!(nl, sim.cells, sim.bodies, sim.geom.rmax, sim.box, contact_range(sim.contact_terms))
+    fill!(sim.status, 0)
     return sim
 end
 
@@ -128,16 +147,13 @@ end
 Evaluate ∂E/∂(r, θ, aₙ, bₙ) of all energy terms for the current state.
 Requires up-to-date geometry and neighbour lists (see [`update_neighbors!`](@ref)).
 """
-function compute_gradients!(sim::Simulation)
+function compute_gradients!(sim::Simulation; frame::Bool = true, status = nothing)
     (; basis, box, bodies, geom, grad, neighbors) = sim
-    reset!(grad)
-    body_terms!(grad, sim.body_terms, geom, bodies, basis)
-    if !isempty(sim.contact_terms)
-        contact_pressure!(grad.P, sim.contact_terms, geom, bodies, neighbors, box, basis)
-        contact_gradient!(grad, geom, basis)
-    end
-    bond_gradient!(grad, sim.bond_terms, bodies, sim.bonds, box)
-    pullback!(grad, geom, bodies, basis)
+    body_terms!(grad, sim.body_terms, geom, bodies, basis, sim.layout; status)  # initialises grad
+    isempty(sim.contact_terms) ||
+        contact_gradients!(grad, sim.contact_terms, geom, bodies, neighbors, box, basis; status)
+    bond_gradient!(grad, sim.bond_terms, bodies, sim.bonds, box; status)
+    pullback!(grad, geom, bodies, basis; frame)
     return grad
 end
 
@@ -149,37 +165,77 @@ Advance the simulation by `n` Euler–Maruyama steps.
 function step!(sim::Simulation, n::Integer = 1)
     for _ in 1:n
         isempty(sim.contact_terms) || update_neighbors!(sim)
-        compute_gradients!(sim)
-        sim.hook === nothing || sim.hook(sim)
-        randn!(sim.rng, sim.noise)
-        integrate!(sim.bodies, sim.grad, sim.disp, sim.noise, sim.children, sim.types, sim.dt,
-            sim.box, sim.basis)
-        update_geometry!(sim.geom, sim.basis, sim.bodies)
+        advance!(sim)
         sim.t += sim.dt
         sim.step += 1
     end
     return sim
 end
 
+# One step after the neighbour list update: gradients, hook, integration and
+# geometry. Only device operations apart from the hook. Per-body work is
+# fused into the integration kernels (see euler_maruyama_kernel!): noise
+# generated on the fly (draw index from the device clock), the body-frame
+# gradient (unless a hook may modify sim.grad first), the lab-frame geometry
+# and the Verlet skin check, which raises the rebuild flag for the next step.
+function advance!(sim::Simulation)
+    hooked = sim.hook !== nothing
+    compute_gradients!(sim; frame = hooked, status = sim.status)
+    hooked && sim.hook(sim)
+    skin = isempty(sim.contact_terms) ? nothing : skin_args(sim.neighbors)
+    integrate!(sim.bodies, sim.grad, sim.disp, PhiloxNoise(sim.key, sim.clock), sim.children,
+        sim.types, sim.dt, sim.box, sim.basis; geom = sim.geom, skin, frame = !hooked,
+        clock = sim.clock, status = sim.status)
+    synthesize!(sim.geom, sim.basis)
+    return sim
+end
+
 """
-    run!(sim, nsteps; every = 0, callback = nothing)
+    device_step!(sim)
+
+One step without host synchronisation, for capture in a CUDA graph: the skin
+check (fused into the update of the previous step) only raises the rebuild
+flag in `sim.status`, which freezes this and all following steps (see
+`isactive`) until the host rebuilds the neighbour list.
+Requires a valid neighbour list with `skin > 0` and no hook; `sim.t` and
+`sim.step` are not updated (the device clock is).
+"""
+device_step!(sim::Simulation) = advance!(sim)
+
+"Whether `sim` can run in graph mode (see [`run!`](@ref))."
+graph_capable(sim::Simulation) =
+    sim.hook === nothing && (isempty(sim.contact_terms) || sim.neighbors.skin > 0)
+
+"""
+    run!(sim, nsteps; every = 0, callback = nothing, graph = true)
 
 Advance `nsteps` steps, calling `callback(sim)` every `every` steps.
+
+With `graph = true`, backends that support it run the steps between callbacks
+as captured graphs (CUDA, via the CUDA extension: one launch per step and one
+host synchronisation per chunk of steps instead of one per step). Results are
+identical to [`step!`](@ref). Graph mode needs `hook! = nothing` and, with
+contact terms, a Verlet `skin > 0`; otherwise `run!` steps eagerly.
 """
-function run!(sim::Simulation, nsteps::Integer; every::Integer = 0, callback = nothing)
+function run!(sim::Simulation, nsteps::Integer; every::Integer = 0, callback = nothing,
+        graph::Bool = true)
+    advance(n) = graph && graph_capable(sim) ? run_steps!(get_backend(sim.bodies.x), sim, n) : step!(sim, n)
     if callback === nothing || every <= 0
-        step!(sim, nsteps)
+        advance(nsteps)
     else
         done = 0
         while done < nsteps
             n = min(every, nsteps - done)
-            step!(sim, n)
+            advance(n)
             done += n
             callback(sim)
         end
     end
     return sim
 end
+
+"Run `n` steps on `backend`; extensions add graph-based methods (default: [`step!`](@ref))."
+run_steps!(backend, sim::Simulation, n::Integer) = step!(sim, n)
 
 function Base.show(io::IO, sim::Simulation{T}) where {T}
     print(io, "Simulation{$T}(N=$(nbodies(sim)), $(sim.basis), box=$(sim.box.Lx)×$(sim.box.Ly), ",

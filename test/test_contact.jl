@@ -131,4 +131,32 @@ end
         @test abs(inside.grad.gx[2]) < 1e-10
         @test abs(inside.grad.gx[1]) < 1e-10
     end
+
+    @testset "Verlet skin" begin
+        function skin_sim(skin; v0 = 1.0)
+            bodies, box = hexagonal_monolayer(6, 6; packing = 0.97, rng = Xoshiro(2))
+            Simulation(bodies, box; types = (BodyType(; v0, Dr = 1.0, Dt = 0.01, μab = 1.0),),
+                energies = (Tension(0.1), Overlap(1.0), LinearRepulsion(0.3)), dt = 0.01, skin, seed = 3)
+        end
+        @test_throws ArgumentError skin_sim(-0.1)
+        # the list built with the skin is a superset of the interacting pairs at every step
+        # (P from step! belongs to the state before the step, so recompute it)
+        sim = skin_sim(0.2)
+        exact = true
+        for _ in 1:60
+            step!(sim)
+            FourierContourCells.update_neighbors!(sim)
+            compute_gradients!(sim)
+            exact &= Array(sim.grad.P) ≈ brute_force_pressure(sim)
+        end
+        @test exact
+        @test 3 < sim.neighbors.builds < 50
+        # skin = 0 rebuilds every step
+        @test step!(skin_sim(0.0), 10).neighbors.builds == 10
+        # extra neighbours only change the summation order
+        a, b = step!(skin_sim(0.0; v0 = 0.3), 100), step!(skin_sim(0.5; v0 = 0.3), 100)
+        @test b.neighbors.builds < a.neighbors.builds
+        @test b.bodies.x ≈ a.bodies.x rtol = 1e-10
+        @test b.bodies.coef ≈ a.bodies.coef rtol = 1e-10
+    end
 end

@@ -29,11 +29,13 @@ module FourierContourCells
 using KernelAbstractions
 using KernelAbstractions: @kernel, @index, @Const, get_backend, CPU
 using LinearAlgebra: mul!
-using Random: Random, randn!
-using StaticArrays: SVector, SMatrix
+using Random: Random
+using StaticArrays: SVector, SMatrix, StaticArray, StaticVector, similar_type
 import ForwardDiff
+import Adapt
 
 include("utils.jl")
+include("random.jl")
 include("basis.jl")
 include("box.jl")
 include("bodies.jl")
@@ -56,16 +58,17 @@ export FourierBasis, PeriodicBox, Bodies, BodyType, nbodies, ncoef, nmodes
 # not exported (generic names), e.g. `FourierContourCells.energy(t::MyTerm, Q, b) = ...`
 export EnergyTerm, BodyTerm, ContactTerm, BondTerm, BodyInfo, OnTypes, ForwardDiffAD, EnzymeAD
 public contour_integrands, energy, contour_integrand_gradients, energy_gradient, pressure,
-    interaction_range, applies_to, ad_backend, bond_energy, bond_gradient
+    interaction_range, applies_to, ad_backend, bond_energy, bond_gradient, convert_precision
 # built-in energy terms
 export Tension, PerimeterElasticity, Overlap, LinearRepulsion, HarmonicBond
 # simulation
-export Simulation, step!, run!, compute_gradients!, hexagonal_monolayer, with_nuclei, parent_bonds, CPU
+export Simulation, step!, run!, compute_gradients!, hexagonal_monolayer, with_nuclei, parent_bonds, CPU,
+    KernelLayout, BodyParallel, NodeParallel
 # observables
 export perimeters, areas, shape_index, positions, unwrapped_positions, contours, body_energy,
     protrusion
 # helpers for user kernels and diagnostics (public, not exported)
-public minimum_image, contour_radius, node_angle, to_host, to_backend
+public minimum_image, contour_radius, node_angle, to_host, to_backend, default_layout
 # visualisation (Makie extension)
 export cellview!, update_view!, cellplot
 # public API with generic names, not exported: call them qualified,

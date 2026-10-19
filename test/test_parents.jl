@@ -55,10 +55,10 @@ end
         rng = Xoshiro(4)
         g.gx .= randn(rng, 3)
         g.gy .= randn(rng, 3)
-        sim.noise .= randn(rng, 3, 3)
-        θ, ξ, dt = copy(b.θ), copy(sim.noise), sim.dt
+        ξ = randn(rng, 3, 3)
+        θ, dt = copy(b.θ), sim.dt
         x0, y0 = copy(b.x), copy(b.y)
-        integrate!(b, g, sim.disp, sim.noise, sim.children, sim.types, dt, sim.box, sim.basis)
+        integrate!(b, g, sim.disp, ξ, sim.children, sim.types, dt, sim.box, sim.basis)
         e(i) = [cos(θ[i]), sin(θ[i])]
         G(i) = [g.gx[i], g.gy[i]]
         noise(i, D) = sqrt(2D * dt) .* ξ[1:2, i]

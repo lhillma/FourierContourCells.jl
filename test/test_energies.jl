@@ -15,6 +15,16 @@ struct DensityOnlyTension{T} <: BodyTerm
 end
 FourierContourCells.contour_integrands(t::DensityOnlyTension, R, dR, ddR) = t.η * sqrt(R^2 + dR^2)
 
+# Term whose constructor does not take its fields, with the documented
+# convert_precision override (stores η and the derived 2η)
+struct DoubledTension{T} <: BodyTerm
+    η::T
+    twoη::T
+    DoubledTension(η::T) where {T} = new{T}(η, 2η)
+end
+FourierContourCells.contour_integrands(t::DoubledTension, R, dR, ddR) = t.η * sqrt(R^2 + dR^2)
+FourierContourCells.convert_precision(::Type{T}, t::DoubledTension) where {T} = DoubledTension(T(t.η))
+
 "Single-body simulation with one deformed body; returns (sim, coef)."
 function single_body_sim(terms; θ = 0.4, R0 = 1.2, nθ = 40, type = 1, ntypes = 1)
     coef = reshape(deformed_coef(), :, 1)
@@ -90,5 +100,33 @@ end
             @test (body_energy(sim) > 0) == active
             @test any(!iszero, sim.grad.gcoef) == active
         end
+    end
+
+    @testset "term parameters follow the simulation precision" begin
+        cp = FourierContourCells.convert_precision
+        @test cp(Float32, Tension(0.01)) === Tension(0.01f0)
+        @test cp(Float32, HarmonicBond(0.2; r0 = 0.1)) === HarmonicBond(0.2f0, 0.1f0)
+        o = cp(Float32, Overlap([1.0 2.0; 2.0 3.0]; related = [1.0 -0.5; -0.5 1.0]))
+        @test eltype(o.J) == eltype(o.Jrelated) == Float32
+        @test o.Jrelated[1, 2] == -0.5f0
+        w = cp(Float32, OnTypes(PerimeterElasticity(0.2, 3.7), 2))
+        @test w.term === PerimeterElasticity(0.2f0, 3.7f0)
+        @test w.types === (Int32(2),)
+        @test cp(Float64, Tension(0.01f0)) === Tension(Float64(0.01f0))
+        @test cp(Float32, Bending(0.5)).κb isa Float32
+        # a constructor that does not take the fields: unchanged, with a warning
+        struct FixedTerm <: BodyTerm
+            a::Float64
+            FixedTerm() = new(1.0)
+        end
+        @test (@test_logs (:warn,) cp(Float32, FixedTerm())) === FixedTerm()
+        @test (@test_logs cp(Float64, FixedTerm())) === FixedTerm()  # nothing to convert: no warning
+        # a user method applies alone and inside OnTypes (no ambiguity, no warning)
+        @test (@test_logs cp(Float32, DoubledTension(0.1))) === DoubledTension(0.1f0)
+        @test (@test_logs cp(Float32, OnTypes(DoubledTension(0.1), 1))).term === DoubledTension(0.1f0)
+        sim = Simulation(hexagonal_monolayer(2, 2)...; types = (BodyType(),),
+            energies = (Tension(0.01), Overlap(1.0)), T = Float32)
+        @test sim.body_terms[1] === Tension(0.01f0)
+        @test eltype(sim.contact_terms[1].J) == Float32
     end
 end

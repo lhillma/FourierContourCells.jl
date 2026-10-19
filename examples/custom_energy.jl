@@ -1,6 +1,6 @@
 # Tutorial: user-defined energy terms
 #
-#   julia -t auto --project=examples examples/custom_energy.jl
+#   julia -t auto --project=examples examples/custom_energy.jl [backend=cpu|gpu] [T=Float32|Float64]
 #
 # Energy terms never see Fourier coefficients. They are written in terms of the
 # cell contour in polar form around the cell centre, R(φ), and its derivatives
@@ -11,9 +11,18 @@
 #
 #   BodyTerm     energy of a single cell from its shape    (sections 1–3)
 #   ContactTerm  interaction between neighbouring cells    (section 4)
+#
+# Terms are evaluated inside compute kernels, on the CPU or on a GPU (see
+# backend.jl). They must be type-stable and allocation-free, and should keep
+# to the precision of their arguments: write `oftype(R, π)` rather than `π`
+# and avoid Float64 literals such as `5 / 2` in exponents, which silently
+# promote Float32 maths to the (on consumer GPUs much slower) Float64.
+# Parameters stored in a term are converted to the simulation's precision
+# automatically.
 
 using FourierContourCells
 using GLMakie
+include("backend.jl")
 import FourierContourCells: contour_integrands, energy, contour_integrand_gradients,
     pressure, interaction_range
 
@@ -27,13 +36,17 @@ import FourierContourCells: contour_integrands, energy, contour_integrand_gradie
 #
 #    Example: bending rigidity κ ∮ c² ds, with the curvature
 #    c = (R² + 2R'² - R R'') / (R² + R'²)^{3/2} and the arc length element
-#    ds = √(R² + R'²) dφ, so e = κ c² √(R² + R'²).
+#    ds = √(R² + R'²) dφ, so e = κ c² √(R² + R'²) = κ (R² + 2R'² - R R'')² / s⁵
+#    with s = √(R² + R'²).
 
 struct Bending{T} <: BodyTerm
     κ::T
 end
 
-contour_integrands(t::Bending, R, dR, ddR) = t.κ * (R^2 + 2dR^2 - R * ddR)^2 / (R^2 + dR^2)^(5 / 2)
+function contour_integrands(t::Bending, R, dR, ddR)
+    s = sqrt(R^2 + dR^2)
+    return t.κ * (R^2 + 2dR^2 - R * ddR)^2 / s^5
+end
 
 # ---------------------------------------------------------------------------
 # 2. Nonlinear energies of contour integrals
@@ -78,11 +91,11 @@ end
 #    whose gradient is known, so only the integrand gradient is needed):
 
 function contour_integrand_gradients(t::Bending, R, dR, ddR)
-    s2 = R^2 + dR^2
+    s = sqrt(R^2 + dR^2)
     num = R^2 + 2dR^2 - R * ddR
-    ∂R = t.κ * (2num * (2R - ddR) / s2^(5 / 2) - 5num^2 * R / s2^(7 / 2))
-    ∂dR = t.κ * (8num * dR / s2^(5 / 2) - 5num^2 * dR / s2^(7 / 2))
-    ∂ddR = t.κ * (-2num * R / s2^(5 / 2))
+    ∂R = t.κ * (2num * (2R - ddR) / s^5 - 5num^2 * R / s^7)
+    ∂dR = t.κ * (8num * dR / s^5 - 5num^2 * dR / s^7)
+    ∂ddR = t.κ * (-2num * R / s^5)
     return (∂R, ∂dR, ∂ddR)
 end
 
@@ -116,10 +129,11 @@ interaction_range(a::BandAdhesion) = a.w
 # Run: terms are simply listed; body and contact terms are sorted out
 # automatically. OnTypes(term, types...) restricts a term to some body types.
 
+backend, T = backend_and_precision()
 bodies, box = hexagonal_monolayer(16, 16; packing = 0.7)
 sim = Simulation(bodies, box;
     types = (BodyType(v0 = 0.03, Dr = 0.01, μab = 0.1),),
     energies = (Tension(0.01), Bending(0.005), PerimeterAndRoundness(0.01, 3.7, 0.001),
-        Overlap(1.0), BandAdhesion(0.05, 0.1)))
+        Overlap(1.0), BandAdhesion(0.05, 0.1)), backend, T)
 
 FourierContourCells.live_view(sim; steps_per_frame = 50)

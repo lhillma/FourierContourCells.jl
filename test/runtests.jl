@@ -9,7 +9,7 @@ using Test
 function refresh!(sim)
     FourierContourCells.enforce_shape!(sim.bodies, sim.basis)
     FourierContourCells.update_geometry!(sim.geom, sim.basis, sim.bodies)
-    FourierContourCells.update_neighbors!(sim)
+    FourierContourCells.update_neighbors!(sim; force = true)
     compute_gradients!(sim)
     return sim
 end
@@ -28,5 +28,8 @@ end
     include("test_contact.jl")
     include("test_dynamics.jl")
     include("test_parents.jl")
+    include("test_random.jl")
+    include("test_layout.jl")
+    include("test_cuda.jl")
     include("test_enzyme.jl")
 end

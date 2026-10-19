@@ -47,9 +47,11 @@ box edge are clamped into the last cell.
 #   x, y    N, wrapped body positions
 #   ncx, ncy, wx, wy  grid size and cell widths (see CellList)
 @kernel function cell_index_kernel!(cellid, @Const(x), @Const(y), ncx, ncy, wx, wy)
-    i = @index(Global)
-    cx, cy = grid_coords(ncx, ncy, wx, wy, x[i], y[i])
-    cellid[i] = cx + ncx * cy + Int32(1)
+    @inbounds begin
+        i = @index(Global)
+        cx, cy = grid_coords(ncx, ncy, wx, wy, x[i], y[i])
+        cellid[i] = cx + ncx * cy + Int32(1)
+    end
 end
 
 # Find the range of each grid cell in the sorted body list. One work item per
@@ -63,13 +65,15 @@ end
 #   perm         N, body indices sorted by cellid
 #   N            number of bodies
 @kernel function cell_bounds_kernel!(start, stop, @Const(cellid), @Const(perm), N)
-    s = @index(Global)
-    c = cellid[perm[s]]
-    if s == 1 || cellid[perm[s - 1]] != c
-        start[c] = s
-    end
-    if s == N || cellid[perm[s + 1]] != c
-        stop[c] = s
+    @inbounds begin
+        s = @index(Global)
+        c = cellid[perm[s]]
+        if s == 1 || cellid[perm[s - 1]] != c
+            start[c] = s
+        end
+        if s == N || cellid[perm[s + 1]] != c
+            stop[c] = s
+        end
     end
 end
 
@@ -88,22 +92,38 @@ function update_celllist!(cl::CellList, bodies::Bodies)
 end
 
 """
-    NeighborList(N; capacity = 32, backend)
+    NeighborList(N, T; skin = 0, capacity = 32, backend)
 
 Per-body list of potentially interacting bodies, stored as a padded
 `capacity × N` matrix `idx` with `count[i]` valid entries in column `i`.
 Body j is listed for body i if their centres are closer than
-rmax_i + rmax_j + range, which no contour point of i can reach otherwise.
+rmax_i + rmax_j + range + skin, which no contour point of i can reach otherwise.
 The capacity grows automatically when exceeded.
+
+Verlet skin: the list stays valid while no pair can have closed the `skin`
+gap. With the drift δᵢ = |rᵢ - rᵢ⁰| + max(0, rmaxᵢ - rmaxᵢ⁰) since the last
+build (positions `x0`, `y0`, bounds `rmax0`), an unlisted pair is still out of
+range while δᵢ + δⱼ ≤ skin, so the list is rebuilt once some 2δᵢ > skin (each
+body checks itself and raises a flag, see `skin_check!`). With `skin = 0` it
+is rebuilt every step. `builds` counts the builds.
 """
-mutable struct NeighborList{MI <: AbstractMatrix{Int32}, VI <: AbstractVector{Int32}}
+mutable struct NeighborList{T, MI <: AbstractMatrix{Int32}, VI <: AbstractVector{Int32}, V <: AbstractVector{T}}
     idx::MI
     count::VI
+    const skin::T
+    const x0::V
+    const y0::V
+    const rmax0::V
+    valid::Bool
+    builds::Int
 end
 
-function NeighborList(N::Integer; capacity::Integer = 32, backend = CPU())
+function NeighborList(N::Integer, ::Type{T} = Float64; skin = 0, capacity::Integer = 32,
+        backend = CPU()) where {T}
+    skin >= 0 || throw(ArgumentError("skin must be non-negative"))
+    vec() = KernelAbstractions.zeros(backend, T, N)
     return NeighborList(KernelAbstractions.zeros(backend, Int32, capacity, N),
-        KernelAbstractions.zeros(backend, Int32, N))
+        KernelAbstractions.zeros(backend, Int32, N), T(skin), vec(), vec(), vec(), false, 0)
 end
 
 capacity(nl::NeighborList) = size(nl.idx, 1)
@@ -112,8 +132,9 @@ capacity(nl::NeighborList) = size(nl.idx, 1)
 # 3×3 grid cells around i (fewer for collapsed dimensions) and keep every j ≠ i
 # with centre distance ≤ rmaxᵢ + rmaxⱼ + range. Otherwise no contour point of i
 # (at distance ≤ rmaxᵢ from rᵢ) can come within rmaxⱼ + range of rⱼ, i.e. within
-# range of body j. Entries beyond the capacity are counted but not stored, so
-# the caller can detect overflow and retry with a larger matrix.
+# range of body j. Callers include the Verlet skin in range. Entries beyond the
+# capacity are counted but not stored, so the caller can detect overflow and
+# retry with a larger matrix.
 #
 #   idx      (out) cap × N, neighbour indices of body i in column i
 #   count    (out) N, number of neighbours found (may exceed cap)
@@ -122,48 +143,100 @@ capacity(nl::NeighborList) = size(nl.idx, 1)
 #   perm, start, stop  cell list (see CellList)
 #   Lx, Ly   box size (minimum image convention)
 #   ncx, ncy, wx, wy   grid size and cell widths
-#   range    interaction range of the contact terms beyond contact
+#   range    interaction range of the contact terms beyond contact, plus skin
 #   cap      capacity, size(idx, 1)
 @kernel function neighbor_kernel!(idx, count, @Const(x), @Const(y), @Const(rmax), @Const(perm),
         @Const(start), @Const(stop), Lx, Ly, ncx, ncy, wx, wy, range, cap)
-    i = @index(Global)
-    xi = x[i]
-    yi = y[i]
-    ri = rmax[i] + range
-    cx, cy = grid_coords(ncx, ncy, wx, wy, xi, yi)
-    rx = ifelse(ncx >= Int32(3), Int32(1), Int32(0))
-    ry = ifelse(ncy >= Int32(3), Int32(1), Int32(0))
-    n = Int32(0)
-    for oy in (-ry):ry, ox in (-rx):rx
-        cell = mod(cx + ox, ncx) + ncx * mod(cy + oy, ncy) + Int32(1)
-        for q in start[cell]:stop[cell]
-            j = perm[q]
-            j == i && continue
-            dx = minimum_image(xi - x[j], Lx)
-            dy = minimum_image(yi - y[j], Ly)
-            if dx^2 + dy^2 <= (ri + rmax[j])^2
-                n += Int32(1)
-                n <= cap && (idx[n, i] = j)
+    @inbounds begin
+        i = @index(Global)
+        xi = x[i]
+        yi = y[i]
+        ri = rmax[i] + range
+        cx, cy = grid_coords(ncx, ncy, wx, wy, xi, yi)
+        rx = ifelse(ncx >= Int32(3), Int32(1), Int32(0))
+        ry = ifelse(ncy >= Int32(3), Int32(1), Int32(0))
+        n = Int32(0)
+        for oy in (-ry):ry, ox in (-rx):rx
+            cell = mod(cx + ox, ncx) + ncx * mod(cy + oy, ncy) + Int32(1)
+            for q in start[cell]:stop[cell]
+                j = perm[q]
+                j == i && continue
+                dx = minimum_image(xi - x[j], Lx)
+                dy = minimum_image(yi - y[j], Ly)
+                if dx^2 + dy^2 <= (ri + rmax[j])^2
+                    n += Int32(1)
+                    n <= cap && (idx[n, i] = j)
+                end
             end
         end
+        count[i] = n
     end
-    count[i] = n
+end
+
+# Verlet skin check (see NeighborList). One work item per body i: compute the
+# drift since the last neighbour list build,
+#   δᵢ = |rᵢ - rᵢ⁰| + max(0, rmaxᵢ - rmaxᵢ⁰),
+# and raise the rebuild flag if 2δᵢ > skin. Several work items may raise it
+# in one launch: all store the same value with a relaxed atomic store, so no
+# reduction is needed (plain concurrent stores would be a data race). The
+# flag is only read after the launch (by later kernels or the host).
+#
+#   status      (in/out) run status, entry STATUS_REBUILD set to 1 if needed
+#   x, y, rmax  N, current wrapped positions and contour radius bounds
+#   x0, y0, rmax0  N, the same at the last build
+#   Lx, Ly      box size (minimum image of the displacement); skin: Verlet skin
+@kernel function skin_check_kernel!(status, @Const(x), @Const(y), @Const(rmax), @Const(x0),
+        @Const(y0), @Const(rmax0), Lx, Ly, skin)
+    @inbounds begin
+        i = @index(Global)
+        skin_flag!(status, (x0, y0, rmax0, skin), x[i], y[i], rmax[i], i, Lx, Ly)
+    end
+end
+
+# The skin check of body i at the new position (x, y) and bound rmax, with
+# skin = (x0, y0, rmax0, skin) (shared with the fused update kernel).
+Base.@propagate_inbounds function skin_flag!(status, skin, x, y, rmax, i, Lx, Ly)
+    x0, y0, rmax0, s = skin
+    dx = minimum_image(x - x0[i], Lx)
+    dy = minimum_image(y - y0[i], Ly)
+    δ = sqrt(dx^2 + dy^2) + max(zero(dx), rmax - rmax0[i])
+    2δ > s && (KernelAbstractions.@atomic :monotonic status[STATUS_REBUILD] = Int32(1))
+    return nothing
+end
+
+"Arguments of the skin check for the fused update kernel (`nothing`: no check)."
+skin_args(nl::NeighborList) = (nl.valid && nl.skin > 0) ? (nl.x0, nl.y0, nl.rmax0, nl.skin) : nothing
+
+"Raise the rebuild flag in `status` if the Verlet skin of `nl` is exceeded (no host sync)."
+function skin_check!(status, nl::NeighborList, bodies::Bodies, rmax, box::PeriodicBox)
+    skin_check_kernel!(get_backend(status), WORKGROUP)(status, bodies.x, bodies.y, rmax, nl.x0,
+        nl.y0, nl.rmax0, box.Lx, box.Ly, nl.skin; ndrange = nbodies(bodies))
+    return status
 end
 
 """
-    update_neighbors!(nl, cl, bodies, geom, box, range)
+    update_neighbors!(nl, cl, bodies, rmax, box, range)
 
-Rebuild the neighbour list from the cell list `cl` (which must be current).
+Rebuild the neighbour list from the cell list `cl` (which must be current)
+and record the reference state of the Verlet skin.
 """
 function update_neighbors!(nl::NeighborList, cl::CellList, bodies::Bodies, rmax, box::PeriodicBox, range)
     backend = get_backend(bodies.x)
     T = eltype(bodies.x)
     while true
         neighbor_kernel!(backend, WORKGROUP)(nl.idx, nl.count, bodies.x, bodies.y, rmax, cl.perm,
-            cl.start, cl.stop, box.Lx, box.Ly, cl.ncx, cl.ncy, cl.wx, cl.wy, T(range),
+            cl.start, cl.stop, box.Lx, box.Ly, cl.ncx, cl.ncy, cl.wx, cl.wy, T(range) + nl.skin,
             Int32(capacity(nl)); ndrange = nbodies(bodies))
         nmax = Int(maximum(nl.count))
-        nmax <= capacity(nl) && return nl
+        nmax <= capacity(nl) && break
         nl.idx = KernelAbstractions.zeros(backend, Int32, 2nmax, nbodies(bodies))
     end
+    if nl.skin > 0
+        copyto!(nl.x0, bodies.x)
+        copyto!(nl.y0, bodies.y)
+        copyto!(nl.rmax0, rmax)
+    end
+    nl.valid = true
+    nl.builds += 1
+    return nl
 end

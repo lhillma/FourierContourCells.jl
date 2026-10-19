@@ -11,11 +11,14 @@ Coefficients of one body are stored as a column of length [`ncoef`](@ref)
 in the order `[a₀; a₂ … a_M; b₂ … b_M]`. The lab-frame coefficients (αₙ, βₙ)
 are the body-frame coefficients (aₙ, bₙ) rotated by the body orientation θ,
 so the matrices are shared by all bodies and contour synthesis for all bodies
-is one matrix product `C * lab` (see [`update_geometry!`](@ref)).
+is one matrix product `S * (R₀ lab)` (see [`update_geometry!`](@ref)).
 
 Fields:
 - `C`, `D`, `DD`: `nθ × ncoef` matrices mapping lab coefficients to
   R̂, dR̂/dφ, d²R̂/dφ² (R = R₀ R̂).
+- `S`: `3nθ × ncoef`, the stacked `[C; D; DD]`, which synthesises R, R', R''
+  of all bodies in a single matrix product.
+- `cs`: `2 × nθ` table of (cos φₖ, sin φₖ), so kernels need no `sincos` per node.
 - `Δφ`: quadrature weight 2π/nθ.
 """
 struct FourierBasis{T, Mat <: AbstractMatrix{T}}
@@ -25,6 +28,8 @@ struct FourierBasis{T, Mat <: AbstractMatrix{T}}
     C::Mat
     D::Mat
     DD::Mat
+    S::Mat
+    cs::Mat
 end
 
 function FourierBasis{T}(; maxmode::Integer = 6, nθ::Integer = 40, backend = CPU()) where {T}
@@ -34,11 +39,13 @@ function FourierBasis{T}(; maxmode::Integer = 6, nθ::Integer = 40, backend = CP
     K = maxmode - 1
     nc = 2K + 1
     Δφ = 2π / nθ
+    cs = zeros(T, 2, nθ)
     C = zeros(T, nθ, nc)
     D = zeros(T, nθ, nc)
     DD = zeros(T, nθ, nc)
     for k in 1:nθ
         φ = (k - 1) * Δφ
+        cs[1, k], cs[2, k] = cos(φ), sin(φ)
         C[k, 1] = 1
         for (m, n) in enumerate(2:maxmode)
             s, c = sincos(n * φ)
@@ -51,7 +58,8 @@ function FourierBasis{T}(; maxmode::Integer = 6, nθ::Integer = 40, backend = CP
         end
     end
     return FourierBasis(nθ, maxmode, T(Δφ), to_backend(backend, C),
-        to_backend(backend, D), to_backend(backend, DD))
+        to_backend(backend, D), to_backend(backend, DD), to_backend(backend, vcat(C, D, DD)),
+        to_backend(backend, cs))
 end
 FourierBasis(; kwargs...) = FourierBasis{Float64}(; kwargs...)
 
