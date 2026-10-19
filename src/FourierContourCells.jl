@@ -30,7 +30,7 @@ using KernelAbstractions
 using KernelAbstractions: @kernel, @index, @Const, get_backend, CPU
 using LinearAlgebra: mul!
 using Random: Random
-using StaticArrays: SVector, SMatrix, StaticArray, similar_type
+using StaticArrays: SVector, SMatrix, StaticArray, StaticVector, similar_type
 import ForwardDiff
 import Adapt
 

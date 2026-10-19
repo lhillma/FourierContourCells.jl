@@ -127,13 +127,15 @@ end
     end
 end
 
-# Integrands of all terms at one node, concatenated into one SVector; terms
-# that do not apply to the body type contribute zeros.
-@inline _node_integrands(::Tuple{}, type, R, dR, ddR) = SVector{0, typeof(R)}()
-@inline function _node_integrands(terms::Tuple, type, R, dR, ddR)
-    q = as_svector(contour_integrands(first(terms), R, dR, ddR))
-    q = applies_to(first(terms), type) ? q : zero(q)
-    return vcat(q, _node_integrands(Base.tail(terms), type, R, dR, ddR))
+# Integrands of all terms at one node, concatenated into one SVector;
+# `counts` holds Val(number of integrands) per term. Terms that do not apply
+# to the body type contribute zeros without being evaluated.
+@inline _node_integrands(::Tuple{}, ::Tuple{}, type, R, dR, ddR) = SVector{0, typeof(R)}()
+@inline function _node_integrands(terms::Tuple, counts::Tuple, type, R, dR, ddR)
+    t = first(terms)
+    Q = SVector{_val(first(counts)), typeof(R)}
+    q = applies_to(t, type) ? Q(as_svector(contour_integrands(t, R, dR, ddR))) : zero(Q)
+    return vcat(q, _node_integrands(Base.tail(terms), Base.tail(counts), type, R, dR, ddR))
 end
 
 # Split Q = [Q_term; Q_rest] after the first m entries.
@@ -141,22 +143,36 @@ end
 @inline _qtail(Q::SVector{L, T}, ::Val{m}) where {L, T, m} = SVector{L - m, T}(ntuple(c -> Q[m + c], Val(L - m)))
 
 # Energy and contour gradient (∂E/∂R, ∂E/∂R', ∂E/∂R'') at one node of all
-# terms, given the concatenated integrals Q (same chain rule as _body_term!).
-@inline _node_gradients(::Tuple{}, Q, info, R, dR, ddR, Δφ) = (zero(R), zero(SVector{3, typeof(R)}))
-@inline function _node_gradients(terms::Tuple, Q, info, R, dR, ddR, Δφ)
+# terms, given the concatenated integrals Q (same chain rule as _body_term!)
+# and the integrand counts of the terms; terms that do not apply to the body
+# type are skipped.
+@inline _node_gradients(::Tuple{}, ::Tuple{}, Q, info, R, dR, ddR, Δφ) = (zero(R), zero(SVector{3, typeof(R)}))
+@inline function _node_gradients(terms::Tuple, counts::Tuple, Q, info, R, dR, ddR, Δφ)
     t = first(terms)
-    J = as_jacobian(contour_integrand_gradients(t, R, dR, ddR))
-    m = Val(size(J, 1))
-    e, g = _node_gradients(Base.tail(terms), _qtail(Q, m), info, R, dR, ddR, Δφ)
+    m = first(counts)
+    e, g = _node_gradients(Base.tail(terms), Base.tail(counts), _qtail(Q, m), info, R, dR, ddR, Δφ)
     applies_to(t, info.type) || return e, g
+    J = as_jacobian(contour_integrand_gradients(t, R, dR, ddR))
     Qt = _qhead(Q, m)
     w = as_svector(energy_gradient(t, Qt, info)) * Δφ
     return e + energy(t, Qt, info), g + J' * w
 end
 
-"Total number of contour integrals of a tuple of body terms."
-n_integrands(terms::Tuple, ::Type{T}) where {T} =
-    sum(t -> length(as_svector(contour_integrands(t, one(T), zero(T), zero(T)))), terms; init = 0)
+"""
+Number of contour integrals of a body term, from the inferred return type of
+`contour_integrands` (a number, tuple or `SVector`), so the term is not
+evaluated outside its domain. Falls back to evaluating it on the unit circle
+if the type cannot be inferred.
+"""
+function n_integrands(term, ::Type{T}) where {T}
+    m = _integrand_count(Base.promote_op(contour_integrands, typeof(term), T, T, T))
+    return m === nothing ? length(as_svector(contour_integrands(term, one(T), zero(T), zero(T)))) : m
+end
+_integrand_count(::Type{<:Number}) = 1
+_integrand_count(::Type{<:StaticVector{m}}) where {m} = m
+_integrand_count(::Type{<:NTuple{m, Any}}) where {m} = m
+_integrand_count(::Type) = nothing
+_integrand_count(::Type{Union{}}) = nothing  # inference: always throws
 
 # Node-parallel variant of body_terms_kernel! (see KernelLayout). One work item
 # per (node k, body i), in workgroups of nθ × B bodies. Each work item stores
@@ -173,19 +189,20 @@ n_integrands(terms::Tuple, ::Type{T}) where {T} =
 #   R, dR, ddR   nθ × N contour radius and its φ-derivatives at the nodes
 #   R0, type     N, radius scale and type
 #   terms        tuple of BodyTerms
+#   counts       tuple of Val(number of integrands), one per term
 #   N            number of bodies (the ndrange is padded, see node_launch)
 #   Δφ           node spacing 2π/nθ
 #   nq           Val(total number of integrands), sizes the local buffer
 #   status       run status; nothing is done while it is frozen (uniform per launch)
 @kernel function body_terms_node_kernel!(GR, GD, GDD, E, gx, gy, gθ, @Const(R), @Const(dR), @Const(ddR),
-        @Const(R0), @Const(type), terms, N, Δφ, nq, status)
+        @Const(R0), @Const(type), terms, counts, N, Δφ, nq, status)
     @uniform nθ = @groupsize()[1]
     @uniform B = @groupsize()[2]
     qbuf = @localmem eltype(GR) (nθ, B, _val(nq))
     k, i = @index(Global, NTuple)
     _, b = @index(Local, NTuple)
     @inbounds if i <= N && isactive(status)
-        q = _node_integrands(terms, type[i], R[k, i], dR[k, i], ddR[k, i])
+        q = _node_integrands(terms, counts, type[i], R[k, i], dR[k, i], ddR[k, i])
         for c in 1:_val(nq)
             qbuf[k, b, c] = q[c]
         end
@@ -197,7 +214,7 @@ n_integrands(terms::Tuple, ::Type{T}) where {T} =
     if i <= N && isactive(status)
         Q = _sum_nodes(qbuf, b, nθ, nq) * Δφ
         info = BodyInfo(R0[i], type[i])
-        e, g = _node_gradients(terms, Q, info, R[k, i], dR[k, i], ddR[k, i], Δφ)
+        e, g = _node_gradients(terms, counts, Q, info, R[k, i], dR[k, i], ddR[k, i], Δφ)
         GR[k, i] = g[1]
         GD[k, i] = g[2]
         GDD[k, i] = g[3]
@@ -231,10 +248,11 @@ function body_terms!(g::Gradients, terms::Tuple, geom::Geometry, bodies::Bodies,
     N = nbodies(bodies)
     if uses_node_layout(layout, basis.nθ)
         T = eltype(g.GR)
+        counts = map(t -> n_integrands(t, T), terms)
         wg, nd = node_launch(basis.nθ, N)
         body_terms_node_kernel!(backend, wg)(g.GR, g.GD, g.GDD, g.Ebody, g.gx, g.gy, g.gθ, geom.R, geom.dR,
-            geom.ddR, bodies.R0, bodies.type, terms, Int32(N), basis.Δφ,
-            Val(n_integrands(terms, T)), status; ndrange = nd)
+            geom.ddR, bodies.R0, bodies.type, terms, map(Val, counts), Int32(N), basis.Δφ,
+            Val(sum(counts)), status; ndrange = nd)
     else
         body_terms_kernel!(backend, WORKGROUP)(g.GR, g.GD, g.GDD, g.Ebody, g.gx, g.gy, g.gθ, geom.R, geom.dR,
             geom.ddR, bodies.R0, bodies.type, terms, basis.nθ, basis.Δφ, status; ndrange = N)
