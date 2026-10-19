@@ -210,16 +210,17 @@ a third). [`Simulation`](@ref) applies it to all energy terms.
 
 The default rebuilds the term from its fields with the type's default
 constructor, converting floats, static arrays of floats, tuples and nested
-structs (such as the wrapped term of [`OnTypes`](@ref)); integers and other
-values are kept. Terms whose constructor does not accept its fields in
-order are left unchanged with a warning: define a method for them, e.g.
+structs; nested energy terms (such as the wrapped term of [`OnTypes`](@ref))
+are converted with `convert_precision`. Integers and other values are kept.
+Terms whose constructor does not accept its fields in order are left
+unchanged with a warning: define a method for them, e.g.
 
     FourierContourCells.convert_precision(::Type{T}, t::MyTerm) where {T} = MyTerm{T}(t.a, t.b)
 """
-function convert_precision(::Type{T}, term::EnergyTerm) where {T <: AbstractFloat}
+function convert_precision(::Type{T}, term::EnergyTerm) where {T}
     _has_precision(T, term) && return term
     return try
-        _retype(T, term)
+        _rebuild(T, term)
     catch err
         err isa MethodError || rethrow()
         @warn "Could not convert the parameters of $(typeof(term)) to $T; define " *
@@ -244,7 +245,11 @@ _retype(::Type, x::Union{Integer, Symbol, Nothing, Type, Function}) = x
 _retype(::Type{T}, x::Union{Tuple, NamedTuple}) where {T} = map(y -> _retype(T, y), x)
 _retype(::Type{T}, x::StaticArray{S, <:AbstractFloat}) where {T, S} = similar_type(x, T)(x)
 _retype(::Type, x::AbstractArray) = x
-function _retype(::Type{T}, x) where {T}
+_retype(::Type{T}, x::EnergyTerm) where {T} = convert_precision(T, x)  # user methods apply
+_retype(::Type{T}, x) where {T} = _rebuild(T, x)
+
+# x rebuilt from its converted fields with the type's default constructor.
+function _rebuild(::Type{T}, x) where {T}
     S = typeof(x)
     (isstructtype(S) && fieldcount(S) > 0) || return x
     fields = ntuple(f -> _retype(T, getfield(x, f)), fieldcount(S))

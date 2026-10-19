@@ -15,6 +15,16 @@ struct DensityOnlyTension{T} <: BodyTerm
 end
 FourierContourCells.contour_integrands(t::DensityOnlyTension, R, dR, ddR) = t.η * sqrt(R^2 + dR^2)
 
+# Term whose constructor does not take its fields, with the documented
+# convert_precision override (stores η and the derived 2η)
+struct DoubledTension{T} <: BodyTerm
+    η::T
+    twoη::T
+    DoubledTension(η::T) where {T} = new{T}(η, 2η)
+end
+FourierContourCells.contour_integrands(t::DoubledTension, R, dR, ddR) = t.η * sqrt(R^2 + dR^2)
+FourierContourCells.convert_precision(::Type{T}, t::DoubledTension) where {T} = DoubledTension(T(t.η))
+
 "Single-body simulation with one deformed body; returns (sim, coef)."
 function single_body_sim(terms; θ = 0.4, R0 = 1.2, nθ = 40, type = 1, ntypes = 1)
     coef = reshape(deformed_coef(), :, 1)
@@ -111,6 +121,9 @@ end
         end
         @test (@test_logs (:warn,) cp(Float32, FixedTerm())) === FixedTerm()
         @test (@test_logs cp(Float64, FixedTerm())) === FixedTerm()  # nothing to convert: no warning
+        # a user method applies alone and inside OnTypes (no ambiguity, no warning)
+        @test (@test_logs cp(Float32, DoubledTension(0.1))) === DoubledTension(0.1f0)
+        @test (@test_logs cp(Float32, OnTypes(DoubledTension(0.1), 1))).term === DoubledTension(0.1f0)
         sim = Simulation(hexagonal_monolayer(2, 2)...; types = (BodyType(),),
             energies = (Tension(0.01), Overlap(1.0)), T = Float32)
         @test sim.body_terms[1] === Tension(0.01f0)
