@@ -121,5 +121,9 @@ no protruding nuclei).
 - The bond acts on the centres, not the centroids (see Anchoring).
 - All body types share the number of shape modes and contour nodes. Nuclei
   could use fewer of both.
-- Bond energies are not included in `body_energy`.
+- Energy diagnostics: `body_energy` sums the single-body terms only. Bond
+  and contact energies are never evaluated, since the dynamics needs only
+  their gradients. A bond energy observable would be cheap; a contact energy
+  needs an area integral (radial quadrature per node). Both belong with the
+  analysis tools, not this model.
 - The cost of the nucleus pairs in the contact kernel (see Cost).
