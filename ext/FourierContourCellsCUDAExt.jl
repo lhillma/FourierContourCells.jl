@@ -18,21 +18,22 @@ using LinearAlgebra: Transpose
 # allocates a device scalar per call. Such allocations make a captured graph
 # unlaunchable a second time, so the scalars 1 and 0 are cached. CUDA.jl
 # tracks the stream that owns a buffer and synchronises it when another
-# stream uses the buffer, which is illegal during capture; streams are
-# task-local and concurrent simulations run in separate tasks, so the cache is
-# per stream (weak keys: a finished task's stream is collected with its entry).
+# stream uses the buffer, which is illegal during capture. Streams are
+# task-local and concurrent simulations run in separate tasks, so the cache
+# lives in task-local storage, tagged with the stream it was created on. It is
+# freed with its task; a captured graph keeps its own scalars (StepGraph).
 
-const SCALARS = WeakKeyDict{CUDA.CuStream, Dict{DataType, Tuple{Any, Any}}}()
-const SCALARS_LOCK = ReentrantLock()  # simulations may run on several threads
+const SCALARS_KEY = :FourierContourCells_cublas_scalars
 
 function scalars(::Type{T}) where {T}
+    cache = get!(Dict{DataType, Any}, task_local_storage(), SCALARS_KEY)::Dict{DataType, Any}
     s = CUDA.stream()
-    return lock(SCALARS_LOCK) do
-        get!(get!(Dict{DataType, Tuple{Any, Any}}, SCALARS, s), T) do
-            CUDA.is_capturing() && error("cuBLAS scalars must be created outside graph capture")
-            (CuRef{T}(one(T)), CuRef{T}(zero(T)))
-        end
+    entry = get(cache, T, nothing)
+    if entry === nothing || entry[1] !== s
+        CUDA.is_capturing() && error("cuBLAS scalars must be created outside graph capture")
+        entry = cache[T] = (s, CuRef{T}(one(T)), CuRef{T}(zero(T)))
     end
+    return entry[2], entry[3]
 end
 
 const BLASFloat = Union{Float32, Float64}
@@ -53,6 +54,7 @@ end
 # the neighbour list matrix is reallocated (capacity growth).
 mutable struct StepGraph
     exec::CUDA.CuGraphExec
+    scalars::Any       # cuBLAS scalars whose device pointers the graph uses
     dt::Any
     idx::Any
     interval::Float64  # running estimate of the number of steps between rebuilds
@@ -75,10 +77,19 @@ chunk_size(g::StepGraph, sim) = isempty(sim.contact_terms) ? CHUNK_MAX :
 # region (`device_step!`) itself makes no synchronising or allocating calls.
 const CAPTURE_MODE = CUDA.STREAM_CAPTURE_MODE_RELAXED
 
+# CUDA.capture disables the garbage collector process-wide during a capture
+# and restores the previous state afterwards, without locking. Overlapping
+# captures could restore these states out of order (and leave the GC
+# disabled), so captures are serialised; replaying graphs stays concurrent.
+const CAPTURE_LOCK = ReentrantLock()
+
+# Capture one step; returns the executable graph and the cuBLAS scalars it uses.
 function capture_step(sim::Simulation)
-    scalars(eltype(sim.bodies.x))  # create this stream's cuBLAS scalars before capturing
-    graph = CUDA.capture(throw_error = false, flags = CAPTURE_MODE) do
-        device_step!(sim)
+    α, β = scalars(eltype(sim.bodies.x))  # create them before capturing
+    graph = lock(CAPTURE_LOCK) do
+        CUDA.capture(throw_error = false, flags = CAPTURE_MODE) do
+            device_step!(sim)
+        end
     end
     if graph === nothing
         # a kernel was compiled during the capture: compile it outside (this
@@ -88,17 +99,19 @@ function capture_step(sim::Simulation)
             device_step!(sim)
         end
         fill!(sim.status, 0)
-        graph = CUDA.capture(() -> device_step!(sim); flags = CAPTURE_MODE)
+        graph = lock(CAPTURE_LOCK) do
+            CUDA.capture(() -> device_step!(sim); flags = CAPTURE_MODE)
+        end
     end
-    return CUDA.instantiate(graph)
+    return CUDA.instantiate(graph), (α, β)
 end
 
 function step_graph!(sim::Simulation)
     g = sim.graph[]
     if !(g isa StepGraph && g.dt == sim.dt && g.idx === sim.neighbors.idx)
         interval, since = g isa StepGraph ? (g.interval, g.since_rebuild) : (4.0 * CHUNK_MIN, 0)
-        g = StepGraph(capture_step(sim), sim.dt, sim.neighbors.idx, interval, since,
-            sim.neighbors.builds)
+        exec, scal = capture_step(sim)
+        g = StepGraph(exec, scal, sim.dt, sim.neighbors.idx, interval, since, sim.neighbors.builds)
         sim.graph[] = g
     end
     return g
