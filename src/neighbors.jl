@@ -176,8 +176,10 @@ end
 # Verlet skin check (see NeighborList). One work item per body i: compute the
 # drift since the last neighbour list build,
 #   δᵢ = |rᵢ - rᵢ⁰| + max(0, rmaxᵢ - rmaxᵢ⁰),
-# and raise the rebuild flag if 2δᵢ > skin. All writers store the same value,
-# so no reduction or atomics are needed.
+# and raise the rebuild flag if 2δᵢ > skin. Several work items may raise it
+# in one launch: all store the same value with a relaxed atomic store, so no
+# reduction is needed (plain concurrent stores would be a data race). The
+# flag is only read after the launch (by later kernels or the host).
 #
 #   status      (in/out) run status, entry STATUS_REBUILD set to 1 if needed
 #   x, y, rmax  N, current wrapped positions and contour radius bounds
@@ -198,7 +200,7 @@ Base.@propagate_inbounds function skin_flag!(status, skin, x, y, rmax, i, Lx, Ly
     dx = minimum_image(x - x0[i], Lx)
     dy = minimum_image(y - y0[i], Ly)
     δ = sqrt(dx^2 + dy^2) + max(zero(dx), rmax - rmax0[i])
-    2δ > s && (status[STATUS_REBUILD] = Int32(1))
+    2δ > s && (KernelAbstractions.@atomic :monotonic status[STATUS_REBUILD] = Int32(1))
     return nothing
 end
 
