@@ -29,7 +29,7 @@ println("  N = 1024, Float64: ", ms_per_step(soft_fluid(32)), " ms/step")
 if CUDA.functional()
     println("GPU: ", CUDA.name(CUDA.device()))
     for n in (16, 32, 128), T in (Float32, Float64)
-        sim = soft_fluid(n; backend = CUDABackend(), T)
+        local sim = soft_fluid(n; backend = CUDABackend(), T)
         te, tg = ms_per_step(sim; graph = false), ms_per_step(sim)
         println("  N = $(n^2), $T: eager $te, graph $tg ms/step")
     end
