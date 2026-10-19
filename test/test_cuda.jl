@@ -8,7 +8,7 @@ if CUDA.functional()
         gpu(layout = NodeParallel(); kw...) = layout_sim(layout; backend, kw...)
 
         @testset "gradients match the CPU ($(nameof(typeof(l))), nθ = $nθ)" for
-                l in (NodeParallel(), BodyParallel()), nθ in (40, 37)
+                l in (NodeParallel(), BodyParallel()), nθ in (40, 37, 1100)  # 1100: fallback kernels
             a = refresh!(layout_sim(BodyParallel(); nθ))
             b = refresh!(gpu(l; nθ))
             @test FourierContourCells.default_layout(backend) == NodeParallel()

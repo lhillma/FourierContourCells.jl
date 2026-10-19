@@ -122,7 +122,11 @@ function contact_pressure!(P, terms::Tuple, geom::Geometry, bodies::Bodies, nl::
         box::PeriodicBox, basis::FourierBasis; status = nothing)
     T = eltype(P)
     backend = get_backend(P)
-    contact_pressure_kernel!(backend, (basis.nθ, max(1, WORKGROUP ÷ basis.nθ)))(P, bodies.x,
+    # whole bodies per workgroup if they fit, else a workgroup within the
+    # device limits (the kernel needs no particular grouping)
+    nθ = basis.nθ
+    wg = nθ <= WORKGROUP ? (nθ, WORKGROUP ÷ nθ) : (WORKGROUP, 1)
+    contact_pressure_kernel!(backend, wg)(P, bodies.x,
         bodies.y, geom.R, geom.lab, geom.rmax, bodies.R0, bodies.type, bodies.parent, nl.idx,
         nl.count, terms, box.Lx, box.Ly, nmodes(basis), basis.cs, T(contact_range(terms)), status;
         ndrange = (basis.nθ, nbodies(bodies)))
