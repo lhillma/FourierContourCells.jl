@@ -7,10 +7,9 @@
 #   julia -t auto --project=examples examples/nucleus.jl movie    # writes output/nucleus.mp4
 #   julia -t auto --project=examples examples/nucleus.jl test     # pull-in (wetting) check
 #
-# The monolayer runs on a CUDA GPU in Float32 if one is available (`run!`
-# then replays steps as CUDA graphs), otherwise on the CPU in Float64.
-# Options for live, check and movie: backend=cpu|gpu  T=Float32|Float64.
-# The `test` mode always runs on the CPU in Float64 (exact checks).
+# Runs on a CUDA GPU in Float32 if one is available, else on the CPU in Float64
+# (see backend.jl; options for live, check and movie: backend=cpu|gpu
+# T=Float32|Float64). The `test` mode always runs on the CPU in Float64.
 #
 # Extension of the Fourier contour cell model of N. Saito and S. Ishihara,
 # Sci. Adv. 10, eadi8433 (2024), doi:10.1126/sciadv.adi8433.
@@ -40,7 +39,7 @@
 
 using FourierContourCells
 using GLMakie
-using CUDA
+include("backend.jl")
 
 const CELL, NUCLEUS = 1, 2
 
@@ -60,19 +59,6 @@ end
 
 cell_type(; v0 = 0.06, Dr = 0.01) = BodyType(; v0, Dr, μab = 0.1)
 nucleus_type(; Dr = 0.01, drag = :parent) = BodyType(; v0 = 0.0, Dr, μab = 0.1, drag)
-
-# Command line options key=value (after the mode)
-const OPTS = Dict(Pair(split(a, "="; limit = 2)...) for a in ARGS[2:end] if occursin('=', a))
-
-# Compute backend and precision: a CUDA GPU in Float32 if available (Float64
-# is slow on consumer GPUs), else the CPU in Float64.
-function backend_and_precision()
-    gpu = get(OPTS, "backend", CUDA.functional() ? "gpu" : "cpu") == "gpu"
-    gpu && !CUDA.functional() && error("backend=gpu, but CUDA is not functional")
-    backend = gpu ? CUDABackend() : CPU()
-    T = Dict("Float32" => Float32, "Float64" => Float64)[get(OPTS, "T", gpu ? "Float32" : "Float64")]
-    return backend, T
-end
 
 function monolayer(; drag = :parent, kwargs...)
     cells, box = hexagonal_monolayer(32, 32; packing = 0.95)
