@@ -102,20 +102,29 @@ end
 
 capture(f; kwargs...) = pinned(() -> lock(() -> CUDA.capture(f; kwargs...), CAPTURE_LOCK))
 
+# One step with the status frozen: launches (and compiles) every kernel of
+# the step but leaves the state untouched.
+function frozen_step!(sim::Simulation)
+    CUDA.@sync begin
+        fill!(sim.status, 1)
+        device_step!(sim)
+    end
+    fill!(sim.status, 0)
+    return nothing
+end
+
 # Capture one step; returns the executable graph and the cuBLAS scalars it uses.
-function capture_step(sim::Simulation)
+# `warm`: compile the kernels before the capture (first capture of a
+# simulation), so the capture neither fails nor yields to compile them.
+function capture_step(sim::Simulation; warm::Bool = false)
     α, β = scalars(eltype(sim.bodies.x))  # create them before capturing
+    warm && frozen_step!(sim)
     graph = capture(throw_error = false, flags = CAPTURE_MODE) do
         device_step!(sim)
     end
     if graph === nothing
-        # a kernel was compiled during the capture: compile it outside (this
-        # leaves the state untouched while the status is frozen) and retry
-        CUDA.@sync begin
-            fill!(sim.status, 1)
-            device_step!(sim)
-        end
-        fill!(sim.status, 0)
+        # a kernel was compiled during the capture: compile it outside and retry
+        frozen_step!(sim)
         graph = capture(() -> device_step!(sim); flags = CAPTURE_MODE)
     end
     return CUDA.instantiate(graph), (α, β)
@@ -125,7 +134,7 @@ function step_graph!(sim::Simulation)
     g = sim.graph[]
     if !(g isa StepGraph && g.dt == sim.dt && g.idx === sim.neighbors.idx)
         interval, since = g isa StepGraph ? (g.interval, g.since_rebuild) : (4.0 * CHUNK_MIN, 0)
-        exec, scal = capture_step(sim)
+        exec, scal = capture_step(sim; warm = !(g isa StepGraph))
         g = StepGraph(exec, scal, sim.dt, sim.neighbors.idx, interval, since, sim.neighbors.builds)
         sim.graph[] = g
     end
