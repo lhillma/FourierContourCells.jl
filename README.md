@@ -4,7 +4,8 @@ A Julia implementation of the **Fourier contour cell model** for deformable,
 self-propelled cells, generalised to typed bodies (cells, nuclei, …) and
 user-defined energy terms. The compute kernels are written with
 [KernelAbstractions.jl](https://github.com/JuliaGPU/KernelAbstractions.jl), so
-the same code runs multithreaded on the CPU and, in a later step, on the GPU.
+the same code runs multithreaded on the CPU and on NVIDIA GPUs (CUDA, see
+[Running on a GPU](#running-on-a-gpu)).
 
 This package is an **independent reimplementation**. The model, its equations
 of motion and the numerical scheme are entirely due to Nen Saito and Shuji
@@ -38,6 +39,10 @@ julia -t auto --project=examples examples/nucleus.jl   # cells with nuclei (live
 julia -t auto --project=test test/runtests.jl          # test suite
 ```
 
+The examples run on a CUDA GPU in Float32 when one is available and on the
+CPU in Float64 otherwise; append `backend=cpu` or `T=Float64` to override,
+e.g. `examples/live.jl backend=cpu`.
+
 ```julia
 using FourierContourCells, GLMakie
 
@@ -47,7 +52,7 @@ sim = Simulation(bodies, box;
     energies = (Tension(0.01), Overlap(1.0)),                # η = 0.01, excluded volume
     dt = 0.005)
 
-step!(sim, 10_000)
+run!(sim, 10_000)                      # or step!(sim, 10_000)
 shape_index(sim)                       # perimeter / √area per cell
 FourierContourCells.live_view(sim; steps_per_frame = 50)   # run/pause, speed slider
 FourierContourCells.record_movie(sim, "run.mp4"; frames = 300, steps_per_frame = 100)
@@ -113,15 +118,20 @@ import FourierContourCells: contour_integrands, energy
 struct Bending{T} <: BodyTerm      # E = κ ∮ c² ds: integrand only
     κ::T
 end
-contour_integrands(t::Bending, R, dR, ddR) = t.κ * (R^2 + 2dR^2 - R * ddR)^2 / (R^2 + dR^2)^(5 / 2)
+contour_integrands(t::Bending, R, dR, ddR) = t.κ * (R^2 + 2dR^2 - R * ddR)^2 / sqrt(R^2 + dR^2)^5
 
 struct PerimeterElasticity{T} <: BodyTerm   # E = λ (l - l₀)²: nonlinear in Q
     λ::T
     p0::T
 end
 contour_integrands(::PerimeterElasticity, R, dR, ddR) = sqrt(R^2 + dR^2)   # Q[1] = perimeter
-energy(t::PerimeterElasticity, Q, body) = t.λ * (Q[1] - t.p0 * sqrt(π) * body.R0)^2
+energy(t::PerimeterElasticity, Q, body) = t.λ * (Q[1] - t.p0 * sqrt(oftype(t.p0, π)) * body.R0)^2
 ```
+
+Terms run inside the compute kernels, also on GPUs: they must be type-stable
+and allocation-free, and should not mix in Float64 constants (`oftype(x, π)`
+instead of `π`), which would silently slow down Float32 runs. Term parameters
+are converted to the simulation precision automatically (`convert_precision`).
 
 `examples/custom_energy.jl` is a step-by-step tutorial, including hand-written
 derivatives and a contact term.
@@ -197,6 +207,67 @@ Deviations from the reference code, both deliberate:
    discrete θ-gradient is pure quadrature aliasing (~1e-8); the reference code
    omits it too.
 
+## Running on a GPU
+
+NVIDIA GPUs are supported through [CUDA.jl](https://github.com/JuliaGPU/CUDA.jl).
+It is a weak dependency: add it to your environment (the `examples` and `test`
+environments already contain it) and load it next to the package. Pass the
+backend and, on consumer GPUs, single precision to `Simulation`:
+
+```julia
+using FourierContourCells, CUDA
+
+bodies, box = hexagonal_monolayer(32, 32; packing = 0.95)
+sim = Simulation(bodies, box;
+    types = (BodyType(v0 = 0.06, Dr = 0.01, μab = 0.1),),
+    energies = (Tension(0.01), Overlap(1.0)),
+    dt = 0.005, backend = CUDABackend(), T = Float32)
+
+p = Float64[]
+run!(sim, 100_000; every = 1_000, callback = s -> push!(p, sum(shape_index(s)) / nbodies(s)))
+```
+
+- **Use `run!`.** On the GPU it captures one step as a CUDA graph and replays
+  it, so a step costs one launch instead of six kernel launches and two
+  matrix products, and the host synchronises only once per chunk of steps
+  (when the neighbour list needs a rebuild) and at callbacks. Results are
+  identical to `step!`, which launches every kernel eagerly. Graph mode is
+  off with a `hook!` and, for contact terms, with `skin = 0`; disable it
+  explicitly with `run!(...; graph = false)`.
+- **Precision.** Consumer GPUs run Float64 about 10× slower than Float32, so
+  use `T = Float32` there (data-centre GPUs are fine with Float64). Energy
+  term and body type parameters are converted to `T` automatically.
+- **Data.** The state lives on the device: `sim.bodies`, `sim.geom` and
+  `sim.grad` hold `CuArray`s, and `shape_index`, `areas` and `perimeters`
+  return device arrays (use `Array(...)` or reductions). `positions`,
+  `unwrapped_positions`, `contours` and `protrusion` return host arrays.
+  `Bodies` passed to `Simulation` may live on the host.
+- **Randomness.** The noise is a counter-based Philox stream, a function of
+  (`seed`, body, step) only, so CPU and GPU draw the same numbers. Round-off
+  still differs between backends (and between Float32 and Float64), and the
+  contact dynamics amplifies it, so compare such runs statistically.
+- **Several simulations.** A single system of a few thousand bodies does not
+  fill a large GPU. Independent simulations (seeds, parameters) run
+  concurrently when each runs in its own task:
+
+  ```julia
+  sims = [Simulation(bodies, box; types, energies, seed, backend = CUDABackend(), T = Float32)
+          for seed in 1:4]
+  @sync for sim in sims
+      Threads.@spawn run!(sim, 100_000)
+  end
+  ```
+
+  Two 2048-body simulations give 1.9× the throughput of one on an RTX A2000.
+- **Visualisation.** `live_view` and `record_movie` advance the simulation on
+  a separate thread while the main thread renders, so start Julia with
+  `-t auto`. More steps per frame keep the GPU busier.
+
+The test suite runs the GPU tests (`test/test_cuda.jl`) whenever
+`CUDA.functional()` is true. Other KernelAbstractions backends (AMD, Apple,
+Intel GPUs) should work in principle with `backend = ...` but are untested and
+step eagerly, as the graph mode is CUDA-only.
+
 ## Performance
 
 Soft fluid (`Tension` + `Overlap`) at packing 0.95, `examples/benchmark.jl`:
@@ -210,12 +281,9 @@ Soft fluid (`Tension` + `Overlap`) at packing 0.95, `examples/benchmark.jl`:
 | 16384 | RTX A2000 Laptop GPU, `run!` | Float32 | 0.82 |
 
 On GPUs, per-node work runs one work item per (contour node, body)
-(`layout = NodeParallel()`, the GPU default); the neighbour list is rebuilt only when
-bodies have drifted by more than half the Verlet `skin`. With `using CUDA`,
-`run!` replays each step as a captured CUDA graph (results identical to
-`step!`; disable with `run!(...; graph = false)`). Consumer GPUs are
-slow in Float64 (≈10× here), so use `T = Float32` there and compare with CPU
-runs statistically.
+(`layout = NodeParallel()`, the GPU default); on all backends the neighbour
+list is rebuilt only when bodies have drifted by more than half the Verlet
+`skin`. The GPU timings use CUDA graphs (see [Running on a GPU](#running-on-a-gpu)).
 
 ## Layout
 
@@ -230,7 +298,8 @@ src/
   random.jl         counter-based Philox noise (same on CPU and GPU)
   dynamics.jl       displacements (substrate / parent drag), Euler–Maruyama, shape constraints
   simulation.jl     Simulation, step!, run!
-ext/                Makie (visualisation) and Enzyme extensions
+ext/                Makie (visualisation), CUDA (graphs, cuBLAS) and Enzyme extensions
+examples/           live window, movie, custom energy tutorial, nuclei, benchmark
 docs/               modelling notes
 ```
 
