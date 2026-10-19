@@ -83,13 +83,30 @@ const CAPTURE_MODE = CUDA.STREAM_CAPTURE_MODE_RELAXED
 # disabled), so captures are serialised; replaying graphs stays concurrent.
 const CAPTURE_LOCK = ReentrantLock()
 
+# GC.enable is per thread (Julia keeps a process-wide count of threads that
+# disabled it). If the task migrates to another thread during CUDA.capture
+# (it yields when a kernel is compiled in the capture), the GC is re-enabled
+# on the wrong thread and stays disabled for the whole process: memory grows
+# until the process is killed. The capturing task is therefore pinned to its
+# thread (sticky, as @async does with its parent) for the capture.
+function pinned(f)
+    task = current_task()
+    sticky = task.sticky
+    task.sticky = true
+    try
+        return f()
+    finally
+        task.sticky = sticky
+    end
+end
+
+capture(f; kwargs...) = pinned(() -> lock(() -> CUDA.capture(f; kwargs...), CAPTURE_LOCK))
+
 # Capture one step; returns the executable graph and the cuBLAS scalars it uses.
 function capture_step(sim::Simulation)
     α, β = scalars(eltype(sim.bodies.x))  # create them before capturing
-    graph = lock(CAPTURE_LOCK) do
-        CUDA.capture(throw_error = false, flags = CAPTURE_MODE) do
-            device_step!(sim)
-        end
+    graph = capture(throw_error = false, flags = CAPTURE_MODE) do
+        device_step!(sim)
     end
     if graph === nothing
         # a kernel was compiled during the capture: compile it outside (this
@@ -99,9 +116,7 @@ function capture_step(sim::Simulation)
             device_step!(sim)
         end
         fill!(sim.status, 0)
-        graph = lock(CAPTURE_LOCK) do
-            CUDA.capture(() -> device_step!(sim); flags = CAPTURE_MODE)
-        end
+        graph = capture(() -> device_step!(sim); flags = CAPTURE_MODE)
     end
     return CUDA.instantiate(graph), (α, β)
 end
