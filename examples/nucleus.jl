@@ -14,27 +14,18 @@
 # Extension of the Fourier contour cell model of N. Saito and S. Ishihara,
 # Sci. Adv. 10, eadi8433 (2024), doi:10.1126/sciadv.adi8433.
 #
-# Model. Every cell (type 1) contains one nucleus (type 2), a Fourier contour
-# body of its own whose `parent` is the cell (`with_nuclei`).
+# Model (the choices and the measurements behind them: docs/nucleus.md).
+# Every cell (type 1) contains one nucleus (type 2), a Fourier contour body
+# of its own whose `parent` is the cell (`with_nuclei`).
 #
-#   - Overlap: overlap with any other cell or nucleus costs J > 0 per unit
-#     area. A cell and its own nucleus gain -Jw per unit overlap area
-#     (negative `related` coupling): the membrane wraps the nucleus, and parts
-#     of the nucleus poking out are pulled back. This does not cause wetting:
-#     the overlap is at most the (fixed) nucleus area, and a nucleus fully
-#     inside its cell feels no force from it.
-#   - Activity: the nucleus has v0 = 0. Its orientation θ diffuses
-#     independently of the cell's (rotational noise Dr) but only sets the frame
+#   - Overlap: overlap with any other cell or nucleus costs J = 1 per unit
+#     area; a cell and its own nucleus gain Jw per unit overlap area
+#     (negative `related` coupling), so the membrane wraps the nucleus.
+#   - Activity: the nucleus has v0 = 0; its orientation only sets the frame
 #     of its shape modes.
-#   - Anchoring: a harmonic bond E = (k/2) |r_n - r_c|² between the centres of
-#     nucleus and cell (`HarmonicBond`, `parent_bonds`), a crude model of the
-#     cytoskeleton.
-#   - Drag: the nucleus has drag against the cytoplasm, i.e. relative to its
-#     cell (`BodyType(drag = :parent)`): the cell bears the nucleus's forces
-#     and carries it along, so the bond is internal and only re-centres the
-#     nucleus at rate μr_n k. Substrate drag on the nucleus would double-count
-#     the friction of the cell's footprint (an isolated cell would move at
-#     v0/2).
+#   - Anchoring: a harmonic bond (k/2) |r_n - r_c|² between the centres of
+#     nucleus and cell (`HarmonicBond`, `parent_bonds`).
+#   - Drag: the nucleus has drag relative to its cell (`drag = :parent`).
 #   - Nucleus stiffness: a stronger line tension on type 2 than on type 1.
 
 using FourierContourCells
@@ -121,7 +112,7 @@ function mean_cell_displacement(sim, X0)
 end
 
 # ---------------------------------------------------------------------------
-# Pull-in check: a soft nucleus starting half outside its cell, without bond.
+# Pull-in check: a soft nucleus poking 0.2 R₀ out of its cell, without bond.
 # The wrap coupling must pull it in without wetting artefacts (excited modes,
 # irregular shape); without it the nucleus stays where it is.
 
@@ -197,61 +188,3 @@ elseif mode == "movie"
 elseif mode == "live"
     FourierContourCells.live_view(monolayer(); steps_per_frame = 50, layers = LAYERS)
 end
-
-# ---------------------------------------------------------------------------
-# Notes from this prototype (extensibility test of the library)
-#
-# The first version of this script needed its own kernels, a hand-copied
-# `step!`, rewritten viewer loops and a colour-map trick. Library additions
-# that came out of it: `BodyType(drag = :parent)`, `BondTerm`/`HarmonicBond`
-# with `Simulation(...; bonds)` and `parent_bonds`, the prototyping
-# `hook!` keyword, `with_nuclei`, `vcat(::Bodies...)`, `protrusion`, `type =`
-# filters on observables, plot `layers`, and public kernel helpers.
-#
-# Remaining friction:
-#
-# - Cost: 1024 cells + 1024 nuclei take 2.2× the time of the cells alone
-#   (9.0 vs 4.0 ms/step on 1 thread, 3.5 vs 1.6 ms/step on 16 threads).
-#   Nuclei enter the neighbour lists of nearby cells, and the contact kernel
-#   evaluates each cell–own-nucleus pair (needed for the wrap coupling).
-#   After the GPU work (`check`, t = 100): 2.3 ms/step on 16 CPU threads
-#   (Float64), 0.26 ms/step on an RTX A2000 Laptop GPU (Float32, CUDA
-#   graphs). GPU and CPU statistics agree (mean cell displacement 0.93 vs
-#   0.94, ⟨p⟩ of cells 3.819 vs 3.823, no protruding nuclei).
-# - All body types share the number of shape modes and contour nodes.
-# - Bond energies are not included in `body_energy`.
-#
-# Modelling observations (to discuss):
-#
-# - Confinement. With `related` = 0 the membrane does not feel its own
-#   nucleus, so elongating cells narrow past it: 6–7 nuclei protrude at
-#   t = 100 (by up to 0.027 R₀). The wrap coupling Jw (negative `related`
-#   overlap) fixes this at no extra cost. Monolayer at t = 100 (relative
-#   drag; protruding nuclei, nucleus ⟨|cₙ|⟩ for n = 2 and 6, max nucleus p):
-#     Jw = 0, k = 1                  7   7e-5 / 1e-5   3.551
-#     Jw = 2, k = 1                  1   7e-5 / 1e-5   3.549   (0.001 R₀)
-#     Jw = 0, k = 0.2                6   3e-5 / 6e-6   3.546
-#     Jw = 2, k = 0.2                0   3e-5 / 5e-6   3.545
-#     Jw = 2, k = 0.2, ηn = 0.005    0   4e-5 / 2e-5   3.546
-#     Jw = 5, k = 0.2, ηn = 0.005    0   5e-5 / 2e-5   3.547
-#   Cell shapes and displacements are unchanged within noise. No wetting:
-#   a soft nucleus started 0.2 R₀ outside its cell (no spring) is pulled in
-#   by t = 2. Its modes stay ≤ 0.005 and fall off with n. The cell bulges
-#   briefly (|c₂| ≈ 0.014) to wrap the nucleus, and line tension relaxes the
-#   bulge again. Once inside, the nucleus does not stick to the membrane. The
-#   alternative (an energy for nucleus area outside its cell) would need an
-#   interaction range of about a nucleus diameter for all pairs.
-# - Drag (t = 100, same seed; mean cell displacement, ⟨p⟩ of cells):
-#     cells only, no nuclei            0.926   3.821
-#     nuclei with relative drag        0.930   3.825   mean offset < 0.001 R₀
-#     nuclei with substrate drag       0.594   3.766   mean offset ≈ 0.013 R₀
-#   Substrate drag on the nucleus double-counts the friction of the cell's
-#   footprint: an isolated pair (both μr = 1) moves at v0/2 with a lag of
-#   v0 / (2 μr k) = 0.03 R₀, independent of k. With relative drag the
-#   composite moves at v0 without lag, and the monolayer matches the
-#   cells-only model, since the nuclei are rarely touched by other bodies.
-# - The spring acts on the polar origins r, which differ from the area
-#   centroids once modes n ≥ 2 are excited (products of modes create n = 1
-#   harmonics in ∮ R³ e_φ dφ). Accepted for now.
-# - With line tension 0.05 the nuclei stay circular (⟨p⟩ = 3.545); they are
-#   rarely touched by other bodies.

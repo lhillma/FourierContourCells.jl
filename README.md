@@ -174,7 +174,8 @@ FourierContourCells.live_view(sim; layers = ((types = 1, color = :shape_index),
 - Diagnostics: `protrusion(sim)` and the `type =` filter of `shape_index`,
   `areas`, `perimeters`.
 
-`examples/nucleus.jl` documents the modelling choices and checks them.
+`examples/nucleus.jl` runs and checks this model; `docs/nucleus.md` explains
+the modelling choices and the measurements behind them.
 For quick experiments, `Simulation(...; hook! = f)` calls `f(sim)` after the
 gradients in every step. It is meant for prototyping only.
 
@@ -230,6 +231,7 @@ src/
   dynamics.jl       displacements (substrate / parent drag), Euler–Maruyama, shape constraints
   simulation.jl     Simulation, step!, run!
 ext/                Makie (visualisation) and Enzyme extensions
+docs/               modelling notes
 ```
 
 ## Citing
