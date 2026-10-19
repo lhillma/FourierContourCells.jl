@@ -29,8 +29,8 @@ converted to element type `T` and moved to the KernelAbstractions `backend`.
   after the energy gradients `sim.grad` are computed and before the
   integration step. It may modify the gradients, e.g. to add forces that no
   energy term expresses yet. **Meant for prototyping only**: it relies on
-  internal fields, which may change, and is not part of the GPU-ready API.
-  Once a prototype works, move it into a proper term.
+  internal fields, which may change, and turns off the graph mode of
+  [`run!`](@ref) on GPUs. Once a prototype works, move it into a proper term.
 
 Body types with `drag = :parent` (see [`BodyType`](@ref)) require every body
 of that type to have a parent with substrate drag.

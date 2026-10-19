@@ -61,7 +61,7 @@ uses_node_layout(::BodyParallel, nθ) = false
 # by the displacement kernel that precedes it.
 const STATUS_REBUILD = 1
 const STATUS_UPDATE = 2
-const STATUS_LENGTH = 3  # entry 3 reserved (neighbour list overflow, see notes)
+const STATUS_LENGTH = 3  # entry 3 reserved (e.g. a neighbour list overflow flag)
 @inline isactive(::Nothing, entry = STATUS_REBUILD) = true
 Base.@propagate_inbounds isactive(status::AbstractVector, entry = STATUS_REBUILD) = status[entry] == 0
 @inline mirror_status!(::Nothing, i) = nothing

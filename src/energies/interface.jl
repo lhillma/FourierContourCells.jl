@@ -1,6 +1,6 @@
 # Energy-term interface
 #
-# Two kinds of terms exist. Both are differentiated with respect to the contour
+# Three kinds of terms exist. They are differentiated with respect to the contour
 # samples R(φₖ), R'(φₖ), R''(φₖ) at the quadrature nodes (and the body centre);
 # the library maps these contour gradients to the dynamical variables
 # (r, θ, aₙ, bₙ) via the chain rule, see `gradients.jl`. Users therefore never

@@ -120,6 +120,8 @@ philox_key(seed::Integer) = ((UInt64(seed) % UInt32), ((UInt64(seed) >> 32) % UI
     end
 end
 
+# Simulations draw the noise on the fly (PhiloxNoise); noise_kernel! stores the
+# same numbers, e.g. to test them or to drive integrate! with a noise matrix.
 "Fill `ξ` (3 × N) with the standard normal noise of draw `n` (integer or device counter)."
 function philox_noise!(ξ, key, n; status = nothing)
     noise_kernel!(get_backend(ξ), WORKGROUP)(ξ, key, n isa Integer ? UInt64(n) : n, status;

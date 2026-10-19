@@ -6,7 +6,7 @@ import FourierContourCells: cellview!, update_view!, cellplot, live_view, record
 using Makie
 
 # One layer of bodies, drawn as a single mesh (filled contours) plus a single
-# line plot (outlines) with fixed topology, see `Geometry` below. Updating a
+# line plot (outlines) with fixed topology (see the Geometry section). Updating a
 # frame only replaces vertex positions and colours.
 struct CellView{S, P, L}
     sim::S

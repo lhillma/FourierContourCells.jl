@@ -11,7 +11,7 @@ Coefficients of one body are stored as a column of length [`ncoef`](@ref)
 in the order `[a₀; a₂ … a_M; b₂ … b_M]`. The lab-frame coefficients (αₙ, βₙ)
 are the body-frame coefficients (aₙ, bₙ) rotated by the body orientation θ,
 so the matrices are shared by all bodies and contour synthesis for all bodies
-is one matrix product `C * lab` (see [`update_geometry!`](@ref)).
+is one matrix product `S * (R₀ lab)` (see [`update_geometry!`](@ref)).
 
 Fields:
 - `C`, `D`, `DD`: `nθ × ncoef` matrices mapping lab coefficients to
