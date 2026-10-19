@@ -237,7 +237,7 @@ function live_view(sim; steps_per_frame::Integer = 20, kwargs...)
     button = Button(controls[1, 1]; label = @lift($running ? "pause" : "run"))
     on(_ -> running[] = !running[], button.clicks)
     Label(controls[1, 2], "steps / frame")
-    slider = Slider(controls[1, 3]; range = 1:500, startvalue = steps_per_frame, width = 300)
+    slider = Slider(controls[1, 3]; range = 1:1000, startvalue = steps_per_frame, width = 300)
     Label(controls[1, 4], @lift(string($(slider.value))))
     # the producer reads the controls through atomics, not Observables
     active = Threads.Atomic{Bool}(true)
